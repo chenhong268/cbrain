@@ -80,7 +80,11 @@ export function register(program: Command) {
       const config = loadConfig();
       const db = new CBrainDB(config.dbPath);
       const pages = new (await import("../../core/page.js")).PageManager(db, config.vaultPath);
-      const resolution = resolveUserSlug(slug, (s) => pages.getBySlug(s));
+      const { isTopicRow } = await import("../../core/shared.js");
+      const resolution = resolveUserSlug(slug, (s) => {
+        const row = db.getPage(s);
+        return isTopicRow(row) ? row : pages.getBySlug(s);
+      });
       if (!resolution) { console.error(`Page not found: ${slug}`); process.exit(1); }
       if (resolution.ambiguous) {
         console.warn(`⚠ Ambiguous slug "${slug}" — matched: ${resolution.ambiguous.join(", ")}. Using: ${resolution.slug}`);
@@ -88,11 +92,10 @@ export function register(program: Command) {
       // #511: a generated topic page reads only through the verified
       // current-topic snapshot (db+vaultPath — no model/embedding config).
       // Not verified current ⇒ safe metadata only, never a stale body.
-      const { isTopicRow } = await import("../../core/shared.js");
       const { createTopicReadAdmission } = await import("../../core/topics/read.js");
       if (isTopicRow(db.getPage(resolution.slug))) {
         const admission = createTopicReadAdmission({ db, vaultPath: config.vaultPath });
-        const snap = admission.readCurrentTopic(resolution.slug);
+        const snap = await admission.readCurrentTopic(resolution.slug);
         const row = db.getPage(resolution.slug)!;
         console.log(`slug:       ${row.slug}`);
         console.log(`type:       ${row.type}`);

@@ -570,17 +570,23 @@ export class HybridSearch {
    * closed. Ordinary rows cost one indexed getPage and never touch topic
    * files/catalog/model state.
    */
-  private topicExcluded(slug: string, allowCurrentTopics: boolean): boolean {
+  private async topicExcluded(slug: string, allowCurrentTopics: boolean): Promise<boolean> {
     if (!isTopicRow(this.db.getPage(slug))) return false;
     if (!allowCurrentTopics || !this.topicAdmission) return true;
-    return !this.topicAdmission.isCurrentTopic(slug);
+    return !await this.topicAdmission.isCurrentTopic(slug);
   }
 
-  private filterTopicRows(results: SearchResult[], allowCurrentTopics: boolean): SearchResult[] {
-    return results.filter((r) => !this.topicExcluded(r.slug, allowCurrentTopics));
+  private async filterTopicRows(results: SearchResult[], allowCurrentTopics: boolean): Promise<SearchResult[]> {
+    const excluded = await Promise.all(results.map((r) => this.topicExcluded(r.slug, allowCurrentTopics)));
+    return results.filter((_, i) => !excluded[i]);
   }
 
   async search(query: string, options?: SearchOptions): Promise<SearchResult[]> {
+    const read = () => this.searchWithinRequest(query, options);
+    return this.topicAdmission ? this.topicAdmission.withRequest(read) : read();
+  }
+
+  private async searchWithinRequest(query: string, options?: SearchOptions): Promise<SearchResult[]> {
     options?.signal?.throwIfAborted();
     if (!query.trim()) return [];
 
@@ -594,7 +600,7 @@ export class HybridSearch {
     // #511 unified exit: source-level filters already removed topic rows in
     // every channel; this final pass is defense-in-depth so no future channel
     // can leak a stale/generated topic body through search.
-    const admitted = this.filterTopicRows(results, options?._allowCurrentTopics === true);
+    const admitted = await this.filterTopicRows(results, options?._allowCurrentTopics === true);
     // Post-fusion sealed detail recovery (#169). Skipped for recursive
     // sub-queries so enrichment happens exactly once at the outer exit.
     if (options?._skipDetailEnrich) return admitted;
@@ -632,7 +638,7 @@ export class HybridSearch {
     // early return, otherwise a stale exact hit would shadow every original
     // record for the same title (#511).
     const exact = this.db.getPageByTitle(query.trim());
-    if (exact && !this.topicExcluded(exact.slug, allowTopics)) {
+    if (exact && !await this.topicExcluded(exact.slug, allowTopics)) {
       const result: SearchResult = {
         slug: exact.slug,
         score: 1.0,
@@ -1245,14 +1251,14 @@ export class HybridSearch {
     let results = await fetchRows(limit * 3);
 
     signal?.throwIfAborted();
-    const collect = (rows: Awaited<ReturnType<typeof fetchRows>>) => {
+    const collect = async (rows: Awaited<ReturnType<typeof fetchRows>>) => {
       const bySlug = new Map<string, { content: string; score: number }>();
       const supportBySlug = includeVector
         ? new Map<string, RetrievalChannelEvidence>()
         : undefined;
       const excludedTopics = new Set<string>();
       for (const r of rows) {
-        if (this.topicExcluded(r.pageSlug, allowTopics)) {
+        if (await this.topicExcluded(r.pageSlug, allowTopics)) {
           excludedTopics.add(r.pageSlug);
           continue;
         }
@@ -1280,14 +1286,14 @@ export class HybridSearch {
       return { bySlug, supportBySlug, excludedTopics };
     };
 
-    let collected = collect(results);
+    let collected = await collect(results);
     // #511 bounded refill: topic chunks squeezed original pages out of the
     // fetched window — ONE widened refetch (bounded by the ≤5 pilot cap), never
     // a broad scan.
     if (collected.excludedTopics.size > 0 && collected.bySlug.size < limit) {
       results = await fetchRows((limit + Math.min(collected.excludedTopics.size, MAX_MANAGED_TOPIC_HEADROOM)) * 3);
       signal?.throwIfAborted();
-      collected = collect(results);
+      collected = await collect(results);
     }
 
     return [...collected.bySlug.entries()].slice(0, limit).map(([slug, v]) => {
@@ -1319,26 +1325,28 @@ export class HybridSearch {
     });
   }
 
-  private ftsSearch(
+  private async ftsSearch(
     query: string,
     limit: number,
     trace?: SearchTrace,
     support: SearchSupportContext = resolveSupportContext(query),
     allowTopics = false,
-  ): SearchResult[] {
+  ): Promise<SearchResult[]> {
     const meta: { fts_fallback?: boolean } = {};
     let rows = this.db.ftsSearch(query, limit, meta);
     // #511 bounded refill: excluded topic rows occupied part of the LIMIT
     // window, which would squeeze original records out of the candidates (and
     // out of the FTS-sufficiency probe). One extra fetch widened by the number
     // of excluded topics (bounded by the ≤5 pilot cap) — never a broad scan.
-    const excludedFirstPass = rows.filter((r) => this.topicExcluded(r.page_slug, allowTopics)).length;
+    const exclusions = await Promise.all(rows.map((r) => this.topicExcluded(r.page_slug, allowTopics)));
+    const excludedFirstPass = exclusions.filter(Boolean).length;
     if (excludedFirstPass > 0) {
       rows = this.db.ftsSearch(query, limit + Math.min(excludedFirstPass, MAX_MANAGED_TOPIC_HEADROOM), meta);
     }
     if (meta.fts_fallback && trace) trace.fts_fallback = true;
+    const excluded = await Promise.all(rows.map((r) => this.topicExcluded(r.page_slug, allowTopics)));
     return rows
-      .filter((r) => !this.topicExcluded(r.page_slug, allowTopics))
+      .filter((_, i) => !excluded[i])
       .map((r) => {
         const result: SearchResult = {
           slug: r.page_slug,
@@ -1352,14 +1360,15 @@ export class HybridSearch {
       });
   }
 
-  private temporalSearch(
+  private async temporalSearch(
     query: string,
     limit: number,
     support: SearchSupportContext,
     allowTopics = false,
-  ): SearchResult[] {
-    const results = this.db.searchTimeline(query, undefined, limit)
-      .filter((r) => !this.topicExcluded(r.page_slug, allowTopics));
+  ): Promise<SearchResult[]> {
+    const rows = this.db.searchTimeline(query, undefined, limit);
+    const excluded = await Promise.all(rows.map((r) => this.topicExcluded(r.page_slug, allowTopics)));
+    const results = rows.filter((_, i) => !excluded[i]);
     return results.map((r) => {
       const result: SearchResult = {
         slug: r.page_slug,
@@ -1391,8 +1400,10 @@ export class HybridSearch {
     // row, so dangling link targets are excluded from recall candidates
     // (defensive — the links FK makes such targets schema-impossible under
     // PRAGMA foreign_keys = ON, so this is unobservable on valid data).
-    return this.graph.traverse(seedSlug, { direction: "both", maxDepth: 2, limit })
-      .filter((node) => !this.topicExcluded(node.slug, allowTopics))
+    const nodes = this.graph.traverse(seedSlug, { direction: "both", maxDepth: 2, limit });
+    const excluded = await Promise.all(nodes.map((node) => this.topicExcluded(node.slug, allowTopics)));
+    return nodes
+      .filter((_, i) => !excluded[i])
       .map((node) => {
       const result: SearchResult = {
         slug: node.slug,

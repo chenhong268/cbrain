@@ -100,6 +100,7 @@ export function readRecordSource(
   vaultPath: string,
   slug: string,
   budgets: TopicBudgets,
+  readRaw?: (relPath: string) => string,
 ): TopicSourceSnapshot {
   const row = db.getPage(slug);
   if (!row || !row.file_path) throw new TopicSourceReadError("not_found", slug);
@@ -108,16 +109,11 @@ export function readRecordSource(
     throw new TopicSourceReadError("not_record", slug);
   }
 
-  let abs: string;
-  try {
-    abs = resolveWithinVault(vaultPath, row.file_path);
-  } catch (e) {
-    if (isNoent(e)) throw new TopicSourceReadError("not_found", slug);
-    throw e;
-  }
   let raw: string;
   try {
-    raw = readFileSync(abs, "utf-8");
+    raw = readRaw
+      ? readRaw(row.file_path)
+      : readFileSync(resolveWithinVault(vaultPath, row.file_path), "utf-8");
   } catch (e) {
     if (isNoent(e)) throw new TopicSourceReadError("not_found", slug);
     throw e;
