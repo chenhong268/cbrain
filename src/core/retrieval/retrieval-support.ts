@@ -211,7 +211,7 @@ function computeKeywordCauseCoverage(query: string, evidence: string): number | 
     // without appended clauses, quotation, questions, or negative/unknown cues.
     // Valid negative explanations remain outside this closed grammar.
     if (!/^[\p{Script=Han}a-z0-9]{2,64}$/u.test(answer)
-      || /(?:[不未无尚待吗么呢]|可能|或许|什么|是否|并非)/u.test(answer)) continue;
+      || /(?:[不未无尚待吗么呢]|可能|或许|什么|是否|并非|暂缺|调查中|猜测|否认)/u.test(answer)) continue;
     return 1;
   }
   return 0;
