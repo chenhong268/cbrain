@@ -313,6 +313,34 @@ async function runContentRecall(
   };
   const keepBirthdayEvidence = (items: SearchResult[]): SearchResult[] =>
     birthdayRequested ? items.filter((item) => !isTopicRow(ctx.db.getPage(item.slug)) && birthdayLine(item.slug) !== null) : items;
+  // FTS ranks chunks: a report heading and its product row may be separate.
+  // Certify only already-selected original records, once per slug/request.
+  const reportRequested = getQuarterlyReportEvidence(query, "") !== undefined;
+  const reportEvidence = new Map<string, string | null>();
+  const reportPages = new Map<string, NonNullable<ReturnType<ToolContext["pages"]["getBySlugFresh"]>>>();
+  const reportLine = (slug: string): string | null => {
+    if (!reportRequested) return null;
+    if (reportEvidence.has(slug)) return reportEvidence.get(slug) ?? null;
+    reportEvidence.set(slug, null);
+    const row = ctx.db.getPage(slug);
+    if (!row || row.type !== "record") return null;
+    try {
+      const page = ctx.pages.getBySlugFresh(slug);
+      if (!page || page.slug !== row.slug || page.title !== row.title || page.type !== row.type
+        || (page.frontmatter?.title !== undefined && page.frontmatter.title !== page.title)
+        || (page.frontmatter?.slug !== undefined && page.frontmatter.slug !== page.slug)
+        || (page.frontmatter?.type !== undefined && page.frontmatter.type !== page.type)) return null;
+      const evidence = getQuarterlyReportEvidence(query, stripKnownRelationsSection(page.body));
+      if (typeof evidence !== "string") return null;
+      reportEvidence.set(slug, evidence);
+      reportPages.set(slug, page);
+      return evidence;
+    } catch { return null; }
+  };
+  const keepSourceEvidence = (items: SearchResult[]): SearchResult[] => {
+    const kept = keepBirthdayEvidence(items);
+    return reportRequested ? kept.filter((item) => reportLine(item.slug) !== null) : kept;
+  };
   let verificationIncomplete = false;
   const trace: SearchTrace = {};
   // #511: content recall is one of the two surfaces allowed to present a
@@ -331,11 +359,11 @@ async function runContentRecall(
     _skipDetailEnrich: true,
     _allowCurrentTopics: allowTopics,
   });
-  let results = keepBirthdayEvidence(dedupeCandidatesBySlug([
+  let results = keepSourceEvidence(dedupeCandidatesBySlug([
     ...(allowTopics ? await namedCurrentTopics(ctx, query) : []),
     // A candidate already contains the exact subject-bound answer. Generic
     // phrase coverage cannot overrule that field-specific source check.
-    ...(birthdayRequested ? keepBirthdayEvidence(candidates) : []),
+    ...(birthdayRequested || reportRequested ? keepSourceEvidence(candidates) : []),
     ...filterContentCandidates(
       query,
       identitySeed ? [identitySeed, ...candidates] : candidates,
@@ -350,7 +378,9 @@ async function runContentRecall(
       _skipDetailEnrich: true,
       _allowCurrentTopics: allowTopics,
     });
-    results = filterContentFtsFallbackCandidates(query, keepBirthdayEvidence(ftsCandidates));
+    results = reportRequested
+      ? dedupeCandidatesBySlug(keepSourceEvidence(ftsCandidates)).slice(0, limit)
+      : filterContentFtsFallbackCandidates(query, keepBirthdayEvidence(ftsCandidates));
     if (results.length === 0) {
       results = selectPersonalTimePlaceRecordFallback(ctx, query, ftsCandidates);
       if (results.length === 0) results = selectRecentMeetingRecordFallback(ctx, query, limit);
@@ -361,7 +391,7 @@ async function runContentRecall(
       }
     }
   }
-  results = keepBirthdayEvidence(results);
+  results = keepSourceEvidence(results);
   if (results.length === 0 && !ambiguousBirthdaySubject
     && exactBirthdayPages.length === 1 && exactBirthdayPages[0]?.type === "entity/person") {
     // Exhaust the existing original-record fallback first. A direct person
@@ -454,7 +484,7 @@ async function runContentRecall(
         generated_at: snap.generatedAt,
       }];
     }
-    const page = ctx.pages.getBySlug(r.slug);
+    const page = reportPages.get(r.slug) ?? ctx.pages.getBySlug(r.slug);
     if (page) {
       pagesBySlug.set(r.slug, { slug: page.slug, expires_at: page.expires_at });
     }
@@ -463,9 +493,8 @@ async function runContentRecall(
     // (including the recent-record verifier's selected correction/status lines).
     const prefixOnly = page?.body?.trim() && (!r.snippet?.trim()
       || r.snippet.trim() === page.title || page.body.trim().startsWith(r.snippet.trim()));
-    const reportEvidence = page ? getQuarterlyReportEvidence(query, page.body) : undefined;
-    const excerpt = typeof reportEvidence === "string" ? reportEvidence
-      : prefixOnly && page ? contentPassage(query, page.body, page.title) : undefined;
+    const certifiedReport = reportLine(r.slug);
+    const excerpt = certifiedReport ?? (prefixOnly && page ? contentPassage(query, page.body, page.title) : undefined);
     return [{
       title: page?.title ?? r.slug,
       snippet: birthdayLine(r.slug) ?? (excerpt === undefined ? r.snippet : excerpt.slice(0, 200)),

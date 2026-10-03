@@ -1,5 +1,4 @@
 import type { SearchResult } from "./search.js";
-import { getQuarterlyReportEvidence } from "./quarter-report-evidence.js";
 import { isStandaloneTemporalFramingToken } from "./recall-intent.js";
 
 export type RetrievalSupportChannel = "exact" | "vector" | "fts" | "graph" | "temporal";
@@ -121,8 +120,6 @@ export function computeRootLexicalCoverage(
 ): number {
   const keywordCause = computeKeywordCauseCoverage(rootQuery, evidenceText);
   if (keywordCause !== undefined) return keywordCause;
-  const quarterlyReport = getQuarterlyReportEvidence(rootQuery, evidenceText);
-  if (quarterlyReport !== undefined) return quarterlyReport === null ? 0 : 1;
 
   const querySegments = tokenize(rootQuery);
   const evidenceSegments = tokenize(evidenceText);

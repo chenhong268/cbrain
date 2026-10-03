@@ -50,30 +50,41 @@ export function getQuarterlyReportEvidence(query: string, evidence: string): str
       || header[2] !== "固定汇率同比" || header[3] !== "官方披露的主要原因"
       || !period.test(headings[0] ?? "")) continue;
     // A nested report period or speculative heading cannot borrow the root period.
-    if (headings.some((text) => /(?:未确认|待核实|预计|预测|假设|草稿|模拟|猜测|否认)/u.test(text)
+    if (headings.some((text) => qualification.test(text) || /(?:预计|预测|否认)/u.test(text)
       || [...text.matchAll(/20\d{2}/gu)].some(([value]) => value !== year)
       || [...text.matchAll(/q([1-4])|第?([一二三四])季度/gu)].some(([, digit, han]) =>
         (digit ? Number(digit) : "一二三四".indexOf(han!) + 1) !== quarter))) continue;
     const separator = cells(lines[i + 1]!);
     if (separator.length !== 4 || !separator.every((cell) => /^:?-{3,}:?$/u.test(cell))) continue;
     let matchedRow: string | undefined;
+    let matchedCells: string | undefined;
+    let conflictingRow = false;
     let end = i + 2;
     for (; end < lines.length; end++) {
       const row = cells(lines[end]!);
       if (row.length !== 4 || row[0] === "产品" || row.every((cell) => /^:?-{3,}:?$/u.test(cell))) break;
-      if (!identity.test(row[0]!) || !/^-\d+(?:\.\d+)?%$/u.test(row[2]!)
-        || Number.parseFloat(row[2]!) >= 0 || !cause.test(row[3]!)
-        || /(?:[不未无尚待吗么呢?？]|可能|或许|是否|并非|暂缺|调查中|猜测|否认)/u.test(row[3]!)) continue;
+      if (!identity.test(row[0]!)) continue;
+      if (!/^-\d+(?:\.\d+)?%$/u.test(row[2]!)
+        || Number.parseFloat(row[2]!) >= 0 || !cause.test(row[3]!) || qualification.test(row[3]!)
+        || /(?:[不未无尚待吗么呢?？]|可能|或许|是否|并非|暂缺|调查中|猜测|否认)/u.test(row[3]!)) {
+        conflictingRow = true;
+        continue;
+      }
+      const normalizedRow = row.join("|");
+      if (matchedCells !== undefined && matchedCells !== normalizedRow) conflictingRow = true;
+      matchedCells ??= normalizedRow;
       const excerpt = `${originalHeadings[0]}\n${originalLines[i]}\n${originalLines[end]}`;
       if (excerpt.length <= 200) matchedRow ??= excerpt;
     }
-    if (!matchedRow) continue;
+    if (!matchedRow || conflictingRow) continue;
     let withdrawn = false;
     for (; end < lines.length && !/^#{1,6}\s/u.test(lines[end]!) && cells(lines[end]!).length === 0; end++) {
       if (qualification.test(lines[end]!)) { withdrawn = true; break; }
     }
+    // A later correction section may explicitly withdraw this table.
+    if (lines.slice(end).some((line) => qualification.test(line)
+      && /(?:上述表格|该表|本表|上述报告|该报告|本报告)/u.test(line))) withdrawn = true;
     if (!withdrawn) return matchedRow;
   }
   return null;
 }
-
