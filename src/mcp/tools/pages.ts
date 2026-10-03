@@ -122,9 +122,11 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
     // file, the page cache, or an old indexed body). Anything not verified
     // current fails closed: safe metadata/status/source refs, no body text.
     if (isTopicRow(row)) {
-      const snap = ctx.topicRead?.readCurrentTopic(slug) ?? null;
+      const [snap, inspection] = ctx.topicRead
+        ? await ctx.topicRead.withRequest(() => Promise.all([
+          ctx.topicRead!.readCurrentTopic(slug), ctx.topicRead!.inspectTopic(slug),
+        ])) : [null, null];
       if (!snap) {
-        const inspection = ctx.topicRead?.inspectTopic(slug) ?? null;
         const reason = inspection?.reasons[0] ?? "not_current";
         const payload = {
           ...row,
@@ -660,6 +662,7 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
     // bodies[i] aligns with foundSlugs[i]; behavior is identical to the old serial loop.
     const bodies = await Promise.all(foundSlugs.map(async (slug) => {
       const row = rowBySlug.get(slug)!;
+      if (isTopicRow(row)) return null;
       const filePath = row.file_path as string | undefined;
       const fullPath = filePath ? join(ctx.vaultPath, filePath) : undefined;
       if (!fullPath) return null;
@@ -673,7 +676,7 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
       }
     }));
 
-    const items = foundSlugs.map((slug, i) => {
+    const readItems = async () => Promise.all(foundSlugs.map(async (slug, i) => {
       const row = rowBySlug.get(slug)!;
       const body = bodies[i];
 
@@ -681,7 +684,7 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
       // current-topic snapshot; anything else shows safe metadata with an
       // empty excerpt — a stale topic's old body must never leak here.
       if (isTopicRow(row)) {
-        const snap = ctx.topicRead?.readCurrentTopic(slug) ?? null;
+        const snap = await ctx.topicRead?.readCurrentTopic(slug) ?? null;
         if (!snap) {
           const item: Record<string, unknown> = {
             slug: row.slug,
@@ -730,7 +733,8 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
       }
 
       return item;
-    });
+    }));
+    const items = ctx.topicRead ? await ctx.topicRead.withRequest(readItems) : await readItems();
 
     // Enrich with tags and link counts for normal detail
     if (actualDetail === "normal" && foundSlugs.length > 0) {

@@ -81,7 +81,9 @@ export function registerFrontdoorTools(server: McpServer, ctx: ToolContext): voi
         envelope = runHierarchyRecall(ctx, query, routing);
         break;
       case "overview":
-        envelope = await runOverviewRecall(ctx, query, routing);
+        envelope = await (ctx.topicRead
+          ? ctx.topicRead.withRequest(() => runOverviewRecall(ctx, query, routing))
+          : runOverviewRecall(ctx, query, routing));
         break;
       case "relationship":
         envelope = runExplicitRelationship(ctx, query, routing)
@@ -94,7 +96,9 @@ export function registerFrontdoorTools(server: McpServer, ctx: ToolContext): voi
         envelope = await runDebugSearch(ctx, query, routing);
         break;
       default:
-        envelope = await runContentRecall(ctx, query, routing, routeDetail);
+        envelope = await (ctx.topicRead
+          ? ctx.topicRead.withRequest(() => runContentRecall(ctx, query, routing, routeDetail))
+          : runContentRecall(ctx, query, routing, routeDetail));
         break;
     }
 
@@ -188,20 +192,20 @@ function contentRecallAllowsCurrentTopics(query: string): boolean {
 /** Explicitly named topics are navigation targets, even when ordinary ranked
  *  candidates crowd them out. Keep this local to derived reading surfaces;
  *  it must not weaken ordinary content relevance or certify new evidence. */
-function namedCurrentTopics(ctx: ToolContext, query: string): SearchResult[] {
+async function namedCurrentTopics(ctx: ToolContext, query: string): Promise<SearchResult[]> {
   if (!ctx.topicRead) return [];
   const normalizedQuery = query.normalize("NFKC").toLowerCase();
-  return ctx.db.listPages({ type: "topic", limit: MAX_MANAGED_TOPICS, orderBy: "slug ASC" }).flatMap((row) => {
+  return (await Promise.all(ctx.db.listPages({ type: "topic", limit: MAX_MANAGED_TOPICS, orderBy: "slug ASC" }).map(async (row) => {
     const label = row.title.normalize("NFKC").replace(/\(主题\)$/, "").trim().toLowerCase();
     if (!label) return [];
     const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     const left = /^[a-z0-9]/.test(label) ? "(?<![a-z0-9])" : "";
     const right = /[a-z0-9]$/.test(label) ? "(?![a-z0-9])" : "";
     if (!new RegExp(`${left}${escaped}${right}`, "u").test(normalizedQuery)) return [];
-    const snapshot = ctx.topicRead!.readCurrentTopic(row.slug);
+    const snapshot = await ctx.topicRead!.readCurrentTopic(row.slug);
     if (!snapshot) return [];
     return [{ slug: row.slug, score: 1, snippet: snapshot.body, source: "exact" as const }];
-  });
+  }))).flat();
 }
 
 async function runContentRecall(
@@ -327,7 +331,7 @@ async function runContentRecall(
     _allowCurrentTopics: allowTopics,
   });
   let results = keepBirthdayEvidence(dedupeCandidatesBySlug([
-    ...(allowTopics ? namedCurrentTopics(ctx, query) : []),
+    ...(allowTopics ? await namedCurrentTopics(ctx, query) : []),
     // A candidate already contains the exact subject-bound answer. Generic
     // phrase coverage cannot overrule that field-specific source check.
     ...(birthdayRequested ? keepBirthdayEvidence(candidates) : []),
@@ -431,12 +435,12 @@ async function runContentRecall(
   const slugs = results.map((r) => r.slug);
   const pagesBySlug = new Map<string, { slug: string; expires_at: string | null }>();
   // #511: topic entities hydrate from the verified read snapshot (fresh-object
-  // per result). A topic that fails re-verification between search and here
-  // (race) is dropped — fail closed, never fall back to cached body/snippet.
+  // per result). Reuse verified bytes within this request; DB mutations
+  // invalidate the proof. Never fall back to the ordinary page cache/snippet.
   const topicSnapshots = new Map<string, TopicReadSnapshot>();
-  const entities = results.flatMap((r) => {
+  const entities = (await Promise.all(results.map(async (r) => {
     if (isTopicRow(ctx.db.getPage(r.slug))) {
-      const snap = ctx.topicRead?.readCurrentTopic(r.slug) ?? null;
+      const snap = await ctx.topicRead?.readCurrentTopic(r.slug) ?? null;
       if (!snap) return [];
       topicSnapshots.set(r.slug, snap);
       return [{
@@ -464,7 +468,7 @@ async function runContentRecall(
       snippet: birthdayLine(r.slug) ?? (excerpt === undefined ? r.snippet : excerpt.slice(0, 200)),
       ...(detail !== "brief" ? { body: birthdayLine(r.slug) ?? excerpt ?? page?.body?.slice(0, 500) ?? "" } : {}),
     }];
-  });
+  }))).flat();
   // #399 — keep the default cbrain_recall content path aligned with deep_recall:
   // generate bounded, explainable proactive hints from the accepted result set.
   // The shared budget keeps at most one hint and suppresses stale/duplicate noise.
@@ -820,15 +824,15 @@ async function runOverviewRecall(
   const allowTopics = contentRecallAllowsCurrentTopics(query);
   const results = await ctx.search.search(query, { limit: 5, _allowCurrentTopics: allowTopics });
   const selected = dedupeCandidatesBySlug([
-    ...(allowTopics ? namedCurrentTopics(ctx, query) : []),
+    ...(allowTopics ? await namedCurrentTopics(ctx, query) : []),
     ...results,
   ]).slice(0, 5);
   let derivedTopicCount = 0;
-  const entities = selected.flatMap((r) => {
+  const entities = (await Promise.all(selected.map(async (r) => {
     if (isTopicRow(ctx.db.getPage(r.slug))) {
       // Same verified snapshot search admitted — never the page cache; a
-      // re-verification failure (race) drops the entity, fail closed.
-      const snap = ctx.topicRead?.readCurrentTopic(r.slug) ?? null;
+      // concurrent DB mutation drops the entity, fail closed.
+      const snap = await ctx.topicRead?.readCurrentTopic(r.slug) ?? null;
       if (!snap) return [];
       derivedTopicCount++;
       const entity: { title: string; snippet: string; type: string; derived: true; sources: string[]; generated_at: string } = {
@@ -848,7 +852,7 @@ async function runOverviewRecall(
     };
     if (page?.type) entity.type = page.type;
     return [entity];
-  });
+  }))).flat();
 
   // #395 — batch-read active links + timeline once over the bounded selection
   // (no N+1). totalLinks = Σ active outgoing + incoming rows; totalEvents =

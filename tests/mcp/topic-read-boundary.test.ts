@@ -486,6 +486,7 @@ describe("topic read boundaries (#511 Task 3)", () => {
         const base = createTopicReadAdmission({ db: db2, vaultPath: vault2 });
         let verifications = 0;
         const counting = {
+          withRequest: base.withRequest,
           inspectTopic: (slug: string) => { verifications++; return base.inspectTopic(slug); },
           isCurrentTopic: (slug: string) => { verifications++; return base.isCurrentTopic(slug); },
           readCurrentTopic: (slug: string) => { verifications++; return base.readCurrentTopic(slug); },
