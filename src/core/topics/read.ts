@@ -14,6 +14,9 @@
  * using it.
  */
 import { readFileSync } from "node:fs";
+import { readFile, realpath, stat } from "node:fs/promises";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { resolve, sep } from "node:path";
 import type { CBrainDB } from "../../storage/sqlite.js";
 import { hashContent, isTopicRow } from "../shared.js";
 import { parseFrontmatter } from "../../utils/frontmatter.js";
@@ -67,7 +70,13 @@ interface TopicReadInspection {
   title: string;
 }
 
-function inspectTopicRead(deps: TopicReadDeps, slug: string): TopicReadInspection | null {
+interface InspectionDeps extends TopicReadDeps {
+  /** Bytes already read asynchronously through the vault boundary. */
+  readRaw?: (relPath: string) => string;
+  catalog?: string;
+}
+
+function inspectTopicRead(deps: InspectionDeps, slug: string): TopicReadInspection | null {
   const { db, vaultPath } = deps;
   const budgets = deps.budgets ?? DEFAULT_TOPIC_BUDGETS;
   const row = db.getPage(slug);
@@ -93,7 +102,7 @@ function inspectTopicRead(deps: TopicReadDeps, slug: string): TopicReadInspectio
 
   let raw: string;
   try {
-    raw = readFileSync(resolveWithinVault(vaultPath, row.file_path!), "utf-8");
+    raw = deps.readRaw ? deps.readRaw(row.file_path!) : readFileSync(resolveWithinVault(vaultPath, row.file_path!), "utf-8");
   } catch {
     return fail(["topic_file_unreadable"]);
   }
@@ -139,10 +148,15 @@ function inspectTopicRead(deps: TopicReadDeps, slug: string): TopicReadInspectio
     };
   }
 
-  const sources = manifest.sources.map((m): { slug: string; ok: boolean; reason?: string } => {
+  // Request reads reject a stale catalog before touching source files.
+  // Maintenance still verifies sources independently for reattestation.
+  const catalogAttested = typeof manifest.catalog === "string";
+  const catalogChanged = catalogAttested && manifest.catalog !== (deps.catalog ?? computeCatalogFingerprint(db));
+  const skipSources = !!deps.readRaw && (!catalogAttested || catalogChanged);
+  const sources = skipSources ? [] : manifest.sources.map((m): { slug: string; ok: boolean; reason?: string } => {
     let reason: string | undefined;
     try {
-      const snapshot = readRecordSource(db, vaultPath, m.slug, budgets);
+      const snapshot = readRecordSource(db, vaultPath, m.slug, budgets, deps.readRaw);
       if (snapshot.disqualified) reason = `source_governance_rejected:${m.slug}`;
       else if (snapshot.contentHash !== m.content_hash) reason = `source_hash_changed:${m.slug}`;
       else if (snapshot.governanceHash !== m.governance_hash) reason = `source_governance_changed:${m.slug}`;
@@ -164,9 +178,7 @@ function inspectTopicRead(deps: TopicReadDeps, slug: string): TopicReadInspectio
   // pages stay blocked until maintenance reattests, which is metadata-only,
   // no model). `state` keeps Task 1 source-only semantics for maintenance
   // eligibility and never reflects the catalog dimension.
-  const freshWithoutCatalog = reasons.length === 0;
-  const catalogAttested = typeof manifest.catalog === "string";
-  const catalogChanged = catalogAttested && manifest.catalog !== computeCatalogFingerprint(db);
+  const freshWithoutCatalog = !skipSources && reasons.length === 0;
   if (!catalogAttested) reasons.push("catalog_missing");
   else if (catalogChanged) reasons.push("catalog_changed");
 
@@ -206,19 +218,146 @@ export function readCurrentTopic(deps: TopicReadDeps, slug: string): TopicReadSn
 /** Narrow admission seam handed to search/read surfaces. Constructed from
  *  db+vaultPath only — never model/pipeline state. */
 export interface TopicReadAdmission {
-  /** Full verification for a topic row (status + safe source refs); null when not a topic. */
-  inspectTopic(slug: string): TopicReadVerification | null;
-  /** True iff the slug is a topic row verified current for reads. */
-  isCurrentTopic(slug: string): boolean;
-  /** Verified current-topic snapshot — the SAME read used for validation. */
-  readCurrentTopic(slug: string): TopicReadSnapshot | null;
+  inspectTopic(slug: string): Promise<TopicReadVerification | null>;
+  isCurrentTopic(slug: string): Promise<boolean>;
+  readCurrentTopic(slug: string): Promise<TopicReadSnapshot | null>;
+  /** Share one bounded, verified snapshot across search and hydration only. */
+  withRequest<T>(read: () => Promise<T>): Promise<T>;
+}
+
+interface ReadRequest {
+  revision: string;
+  catalog?: string;
+  deadline?: number;
+  reads: Map<string, Promise<TopicReadInspection | null>>;
 }
 
 export function createTopicReadAdmission(deps: TopicReadDeps): TopicReadAdmission {
+  const requests = new AsyncLocalStorage<ReadRequest>();
+  // Keep stalled filesystem calls from consuming the server's entire IO pool.
+  // This tracks in-flight operations only, never caches cross-request bytes.
+  const pendingIO = new Set<Promise<string>>();
+  const waiters = new Set<() => void>();
+  // Includes same-connection writes and commits by other connections. Any DB
+  // mutation (including timeline/governance) invalidates request-local proof.
+  const revision = () => JSON.stringify(deps.db.rawDb.prepare("SELECT total_changes(), data_version FROM pragma_data_version").get());
+  const withRequest = async <T>(read: () => Promise<T>): Promise<T> => {
+    if (requests.getStore()) return read();
+    return requests.run({ revision: revision(), reads: new Map() }, read);
+  };
+  const inspect = (slug: string): Promise<TopicReadInspection | null> => withRequest(async () => {
+    const scope = requests.getStore()!;
+    const currentRevision = revision();
+    if (scope.revision !== currentRevision) {
+      scope.reads.clear();
+      scope.catalog = undefined;
+      scope.revision = currentRevision;
+    }
+    let pending = scope.reads.get(slug);
+    if (!pending) {
+      pending = load(slug, scope);
+      scope.reads.set(slug, pending);
+    }
+    const result = await pending;
+    // Never expose a result verified across a concurrent DB mutation.
+    if (revision() !== currentRevision) return null;
+    return result;
+  });
+  const load = async (slug: string, scope: ReadRequest): Promise<TopicReadInspection | null> => {
+    const row = deps.db.getPage(slug);
+    if (!isTopicRow(row)) return null;
+    const bytes = new Map<string, string | Error>();
+    const getRaw = (path: string): string => {
+      const value = bytes.get(path);
+      if (typeof value === "string") return value;
+      throw value ?? new Error("topic_read_unavailable");
+    };
+    // The deadline covers path resolution AND file reads, across all sources
+    // and topics in this request. A stalled OS read cannot block the event loop
+    // or extend the request; late bytes never become a verified snapshot.
+    const read = async (path: string) => {
+      scope.deadline ??= Date.now() + 2000;
+      const remaining = scope.deadline - Date.now();
+      if (remaining <= 0) { bytes.set(path, new Error("topic_read_timeout")); return; }
+      const controller = new AbortController();
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const io = async () => {
+          while (pendingIO.size >= 2) {
+            await new Promise<void>((resolveSlot, rejectSlot) => {
+              const wake = () => { controller.signal.removeEventListener("abort", abort); resolveSlot(); };
+              const abort = () => { waiters.delete(wake); rejectSlot(new Error("topic_read_timeout")); };
+              waiters.add(wake);
+              controller.signal.addEventListener("abort", abort, { once: true });
+            });
+            controller.signal.throwIfAborted();
+          }
+          controller.signal.throwIfAborted();
+          const operation = (async () => {
+            if (!path || path.startsWith("..") || path.startsWith("/") || path.includes("\\") || path.includes("\0")) {
+              throw new TopicSourceReadError("path_unsafe", path);
+            }
+            const root = await realpath(deps.vaultPath);
+            controller.signal.throwIfAborted();
+            const full = await realpath(resolve(deps.vaultPath, path));
+            controller.signal.throwIfAborted();
+            if (full !== root && !full.startsWith(root + sep)) throw new TopicSourceReadError("path_unsafe", path);
+            const info = await stat(full);
+            controller.signal.throwIfAborted();
+            if (!info.isFile()) throw new Error("topic_file_not_regular");
+            // Do not release the slot merely because the caller's timer fired:
+            // readFile AbortSignal may reject while an OS syscall still waits.
+            return readFile(full, { encoding: "utf-8" });
+          })();
+          pendingIO.add(operation);
+          const release = () => {
+            pendingIO.delete(operation);
+            for (const wake of waiters) { waiters.delete(wake); wake(); }
+          };
+          operation.then(release, release);
+          return operation;
+        };
+        const timeout = new Promise<never>((_, reject) => {
+          timer = setTimeout(() => { controller.abort(); reject(new Error("topic_read_timeout")); }, remaining);
+        });
+        bytes.set(path, await Promise.race([io(), timeout]));
+      } catch (error) {
+        bytes.set(path, error instanceof Error ? error : new Error("topic_read_unavailable"));
+      } finally {
+        clearTimeout(timer);
+      }
+    };
+    await read(row!.file_path!);
+    const raw = bytes.get(row!.file_path!);
+    if (typeof raw === "string") {
+      const parsed = parseTopicManifest(parseFrontmatter(raw).frontmatter.topic);
+      const budgets = deps.budgets ?? DEFAULT_TOPIC_BUDGETS;
+      scope.catalog ??= computeCatalogFingerprint(deps.db);
+      if (parsed?.ok && parsed.manifest.catalog === scope.catalog
+        && parsed.manifest.sources.length > 0 && parsed.manifest.sources.length <= budgets.maxSourcesPerTopic
+        && new Set(parsed.manifest.sources.map((s) => s.slug)).size === parsed.manifest.sources.length) {
+        for (const source of parsed.manifest.sources) {
+          const path = deps.db.getPageFilePath(source.slug);
+          if (path && !bytes.has(path)) await read(path);
+        }
+      }
+    }
+    try {
+      return inspectTopicRead({ ...deps, readRaw: getRaw, catalog: scope.catalog }, slug);
+    } catch {
+      return null; // unavailable source bytes cannot admit a derived page
+    }
+  };
   return {
-    inspectTopic: (slug) => verifyTopicForRead(deps, slug),
-    isCurrentTopic: (slug) => verifyTopicForRead(deps, slug)?.current === true,
-    readCurrentTopic: (slug) => readCurrentTopic(deps, slug),
+    withRequest,
+    inspectTopic: async (slug) => (await inspect(slug))?.verification ?? null,
+    isCurrentTopic: async (slug) => (await inspect(slug))?.verification.current === true,
+    readCurrentTopic: async (slug) => {
+      const result = await inspect(slug);
+      if (!result?.verification.current) return null;
+      return { slug, title: result.title, generatedAt: result.manifest.generated_at,
+        sourceSlugs: result.manifest.sources.map((s) => s.slug), raw: result.raw, body: result.body };
+    },
   };
 }
 
