@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
 import { LanceDBManager } from "../../src/storage/lancedb.js";
@@ -103,12 +103,161 @@ describe("topic read snapshot and freshness (#511 Task 3)", () => {
     expect(readCurrentTopic({ db, vaultPath: ctx.vaultPath }, sources[0])).toBeNull();
   });
 
-  test("admission object exposes the same verdicts without model/pipeline deps", () => {
+  test("admission object exposes the same verdicts without model/pipeline deps", async () => {
     const admission = createTopicReadAdmission({ db, vaultPath: ctx.vaultPath });
-    expect(admission.isCurrentTopic(topic)).toBe(true);
-    expect(admission.readCurrentTopic(topic)?.body).toContain(markerA);
-    expect(admission.isCurrentTopic("records/missing")).toBe(false);
+    expect(await admission.isCurrentTopic(topic)).toBe(true);
+    expect((await admission.readCurrentTopic(topic))?.body).toContain(markerA);
+    expect(await admission.isCurrentTopic("records/missing")).toBe(false);
   });
+
+  test("stale catalog rejects admission before resolving source records", async () => {
+    ctx.pages.create({ title: "新材料", type: "record", body: "与主题无关的新材料。" });
+    const getPage = db.getPage.bind(db);
+    let sourceLookups = 0;
+    db.getPage = (slug) => {
+      if (sources.includes(slug)) sourceLookups++;
+      return getPage(slug);
+    };
+    try {
+      const admission = createTopicReadAdmission({ db, vaultPath: ctx.vaultPath });
+      expect((await admission.inspectTopic(topic))?.reasons).toContain("catalog_changed");
+      expect(sourceLookups).toBe(0);
+    } finally {
+      db.getPage = getPage;
+    }
+  });
+
+  test("one request reuses verified bytes, next request rechecks disk edits", async () => {
+    const admission = createTopicReadAdmission({ db, vaultPath: ctx.vaultPath });
+    const getPage = db.getPage.bind(db);
+    let sourceLookups = 0;
+    db.getPage = (slug) => {
+      if (sources.includes(slug)) sourceLookups++;
+      return getPage(slug);
+    };
+    try {
+      await admission.withRequest(async () => {
+        expect(await admission.isCurrentTopic(topic)).toBe(true);
+        expect((await admission.readCurrentTopic(topic))?.body).toContain(markerA);
+        expect(await admission.isCurrentTopic(topic)).toBe(true);
+      });
+      expect(sourceLookups).toBe(3);
+      writeFileSync(sourcePaths[0], readFileSync(sourcePaths[0], "utf-8") + "\n用户更正：安排取消。");
+      await admission.withRequest(async () => {
+        expect(await admission.readCurrentTopic(topic)).toBeNull();
+      });
+    } finally {
+      db.getPage = getPage;
+    }
+  });
+
+  test("DB governance changes invalidate an already verified request snapshot", async () => {
+    const admission = createTopicReadAdmission({ db, vaultPath: ctx.vaultPath });
+    await admission.withRequest(async () => {
+      expect(await admission.isCurrentTopic(topic)).toBe(true);
+      db.rawDb.prepare("INSERT INTO timeline (page_slug, summary, trust_state, source_page_slug) VALUES (?, ?, 'rejected', ?)").run(sources[0], "已否决", sources[0]);
+      expect(await admission.readCurrentTopic(topic)).toBeNull();
+    });
+  });
+
+  test("blocked source IO leaves the event loop responsive and rejects within the read budget", async () => {
+    // A FIFO without a writer reproduces a stalled filesystem read without
+    // involving the operator's vault. Keep it in a disposable process so an
+    // uninterruptible OS read cannot leave the test runner's IO pool stuck.
+    unlinkSync(sourcePaths[0]);
+    const fifo = Bun.spawnSync(["mkfifo", sourcePaths[0]]);
+    expect(fifo.exitCode).toBe(0);
+    const script = `
+      import { CBrainDB } from ${JSON.stringify(join(process.cwd(), "src/storage/sqlite.ts"))};
+      import { buildContext } from ${JSON.stringify(join(process.cwd(), "src/mcp/context.ts"))};
+      import { registerPageTools } from ${JSON.stringify(join(process.cwd(), "src/mcp/tools/pages.ts"))};
+      import { LanceDBManager } from ${JSON.stringify(join(process.cwd(), "src/storage/lancedb.ts"))};
+      import { DeterministicEmbeddingProvider } from ${JSON.stringify(join(process.cwd(), "src/embedding/deterministic.ts"))};
+      const db = new CBrainDB(${JSON.stringify(join(root, "brain.sqlite"))});
+      const ctx = buildContext({ db, vaultPath: ${JSON.stringify(ctx.vaultPath)},
+        runtimePath: ${JSON.stringify(join(root, "runtime"))}, lance: new LanceDBManager(), embedding: new DeterministicEmbeddingProvider() });
+      const handlers = {};
+      registerPageTools({ registerTool: (name, schema, handler) => { handlers[name] = handler; } }, ctx);
+      let heartbeat = false;
+      const healthy = new Promise((resolve) => setTimeout(async () => {
+        const response = await handlers.get_pages({ slugs: [${JSON.stringify(sources[1])}], detail: "normal" });
+        heartbeat = JSON.stringify(response).includes("原始材料1");
+        resolve();
+      }, 25));
+      const started = Date.now();
+      const responses = await Promise.all(Array.from({ length: 32 }, () => handlers.get_page({ slug: ${JSON.stringify(topic)}, include_full_body: true })));
+      await healthy;
+      const result = JSON.parse(responses[0].content[0].text);
+      if (responses.some((r) => JSON.stringify(r).includes(${JSON.stringify(markerA)}))) throw new Error("derived bytes leaked");
+      console.log(JSON.stringify({ heartbeat, unavailable: result.raw?.body == null && !JSON.stringify(result).includes(${JSON.stringify(markerA)}), elapsed: Date.now() - started }));
+      process.exit(0);
+    `;
+    const child = Bun.spawn([process.execPath, "-e", script], { stdout: "pipe", stderr: "pipe" });
+    const guard = setTimeout(() => child.kill(), 4500);
+    try {
+      const output = await new Response(child.stdout).text();
+      const exit = await child.exited;
+      expect(exit).toBe(0);
+      const result = JSON.parse(output.trim());
+      expect(result.heartbeat).toBe(true);
+      expect(result.unavailable).toBe(true);
+      expect(result.elapsed).toBeLessThan(3500);
+    } finally {
+      clearTimeout(guard);
+      child.kill();
+    }
+  }, 6000);
+
+  test("timed-out IO waiters disappear and reads resume after the filesystem recovers", async () => {
+    // Only the external filesystem stall is controlled. The real admission,
+    // SQLite, source verification and files remain intact in the child.
+    const script = `
+      import { mock } from "bun:test";
+      import * as fs from "node:fs/promises";
+      import { CBrainDB } from ${JSON.stringify(join(process.cwd(), "src/storage/sqlite.ts"))};
+      const actualRealpath = fs.realpath;
+      let blocked = true, calls = 0;
+      const releases = [];
+      mock.module("node:fs/promises", () => ({ ...fs, realpath: (path) => {
+        calls++;
+        if (blocked) return new Promise((resolve) => releases.push(() => resolve(actualRealpath(path))));
+        return actualRealpath(path);
+      } }));
+      const { createTopicReadAdmission } = await import(${JSON.stringify(join(process.cwd(), "src/core/topics/read.ts"))});
+      const db = new CBrainDB(${JSON.stringify(join(root, "brain.sqlite"))});
+      const admission = createTopicReadAdmission({ db, vaultPath: ${JSON.stringify(ctx.vaultPath)} });
+      const durations = [];
+      let allRejected = true;
+      for (let round = 0; round < 2; round++) {
+        const started = Date.now();
+        const results = await Promise.all(Array.from({ length: 100 }, () => admission.readCurrentTopic(${JSON.stringify(topic)})));
+        durations.push(Date.now() - started);
+        allRejected &&= results.every((r) => r === null);
+      }
+      const blockedCalls = calls;
+      blocked = false;
+      releases.forEach((release) => release());
+      const recovered = await admission.readCurrentTopic(${JSON.stringify(topic)});
+      console.log(JSON.stringify({ allRejected, durations, blockedCalls, calls, recovered: recovered?.body.includes(${JSON.stringify(markerA)}) }));
+      process.exit(0);
+    `;
+    const child = Bun.spawn([process.execPath, "-e", script], { stdout: "pipe", stderr: "pipe" });
+    const guard = setTimeout(() => child.kill(), 8500);
+    try {
+      const output = await new Response(child.stdout).text();
+      expect(await child.exited).toBe(0);
+      const result = JSON.parse(output.trim());
+      expect(result.allRejected).toBe(true);
+      expect(result.durations.every((ms: number) => ms < 3500)).toBe(true);
+      expect(result.blockedCalls).toBe(2);
+      // Only the new request reads: root + file for the topic and 3 sources.
+      expect(result.calls).toBe(10);
+      expect(result.recovered).toBe(true);
+    } finally {
+      clearTimeout(guard);
+      child.kill();
+    }
+  }, 10000);
 
   test("catalog membership preserves record endpoint, provenance and active-state rules", () => {
     const a = ctx.pages.create({ title: "实体A", type: "entity/person", body: "实体A" }).slug;

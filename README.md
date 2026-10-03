@@ -51,7 +51,7 @@ curl -fsSL https://bun.sh/install | bash
 2. Install CBrain — always pin to an explicit tag:
 
 ```bash
-bun install -g github:chenhong268/cbrain#v2.0.19
+bun install -g github:chenhong268/cbrain#v2.0.20
 ```
 
 3. Verify:
@@ -75,8 +75,8 @@ cbrain serve --http                      # 启动 HTTP 服务 → localhost:3399
 ```bash
 (
   set -e
-  new_version=v2.0.19
-  previous_version=v2.0.18
+  new_version=v2.0.20
+  previous_version=v2.0.19
   test "$(bunx --package "github:chenhong268/cbrain#${new_version}" cbrain --version)" = "${new_version#v}"
   test "$(bunx --package "github:chenhong268/cbrain#${previous_version}" cbrain --version)" = "${previous_version#v}"
   bun remove -g cbrain
@@ -90,7 +90,7 @@ If install or restart verification fails, roll back to the recorded previous tag
 ```bash
 (
   set -e
-  previous_version=v2.0.18
+  previous_version=v2.0.19
   test "$(bunx --package "github:chenhong268/cbrain#${previous_version}" cbrain --version)" = "${previous_version#v}"
   global_bin="${BUN_INSTALL:-$HOME/.bun}/bin"
   global_manifest="${global_bin%/bin}/install/global/package.json"
@@ -638,11 +638,12 @@ bun run dev init
 
 ## Roadmap
 
-See [CHANGELOG.md](./CHANGELOG.md) for the full version history (current: v2.0.19).
+See [CHANGELOG.md](./CHANGELOG.md) for the full version history (current: v2.0.20).
 
 | Version | Focus | Status |
 |:--------|:------|:-------|
-| v2.0.19 | 精确人物生日查询的候选外兜底 | ✅ Current |
+| v2.0.20 | 主题读取异步核验与请求预算 | ✅ Current |
+| v2.0.19 | 精确人物生日查询的候选外兜底 | ✅ Released |
 | v2.0.18 | 已检出生日证据的正向准入修复 | ✅ Released |
 | v2.0.17 | 直接生日查询的证据归属修复 | ✅ Released |
 | v2.0.16 | 主题来源完整收录与有界扩展 | ✅ Released |
