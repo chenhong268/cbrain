@@ -7,3 +7,5 @@
 {"intent": "人物A和人物B什么关系", "expected_tool": "graph_query", "category": "relationship", "note": "关系查询本身不走 provenance", "negative_provenance": true}
 {"intent": "讨论过这个话题吗", "expected_tool": "cbrain_recall", "category": "grounded", "note": "核查确认，不走 provenance", "negative_provenance": true}
 {"intent": "帮我总结一下组织C的情况", "expected_tool": "cbrain_recall", "category": "overview", "note": "概览总结，不走 provenance", "negative_provenance": true}
+{"intent": "追踪这条事件的来源", "expected_tool": "get_provenance", "category": "provenance", "note": "显式 full 溯源会话，已知具体 target，读取该条来源分类与纠正历史", "required_profile": "full"}
+{"intent": "查看这条关系的纠正历史", "expected_tool": "get_provenance", "category": "provenance", "note": "显式 full 溯源会话，已知具体 target，读取该条来源分类与纠正历史", "required_profile": "full"}
