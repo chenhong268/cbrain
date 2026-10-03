@@ -138,7 +138,9 @@ echo ""
 # ── 2. 路由覆盖率 ──
 echo "[2] 路由覆盖率"
 
-TOOLS=("deep_recall" "query" "summarize" "brain_storm" "expand_entity" "recall_episode" "agentic_research" "get_provenance" "graph_query" "get_org_tree")
+# Natural-language cases use the daily frontdoor; advanced/debug escape hatches
+# are documented separately and must not become default routing expectations.
+TOOLS=("cbrain_recall" "recall_episode" "agentic_research" "get_provenance" "graph_query" "get_org_tree")
 
 for tool in "${TOOLS[@]}"; do
   status="ok"
