@@ -26,6 +26,7 @@ import {
 } from "./format-result.js";
 import { buildToolResult } from "./result-builder.js";
 import { FRONTDOOR_DATA_KEYS, projectFrontdoorData, structuredSummary } from "./recall-output.js";
+import { getQuarterlyReportEvidence } from "../../core/retrieval/quarter-report-evidence.js";
 import { filterContentCandidates, filterContentFtsFallbackCandidates } from "../../core/retrieval/content-relevance.js";
 import { applyPersonalCurrentStateGuard } from "../../core/retrieval/personal-current-state-guard.js";
 import { generateProactiveHints } from "../../core/retrieval/proactive.js";
@@ -462,7 +463,9 @@ async function runContentRecall(
     // (including the recent-record verifier's selected correction/status lines).
     const prefixOnly = page?.body?.trim() && (!r.snippet?.trim()
       || r.snippet.trim() === page.title || page.body.trim().startsWith(r.snippet.trim()));
-    const excerpt = prefixOnly && page ? contentPassage(query, page.body, page.title) : undefined;
+    const reportEvidence = page ? getQuarterlyReportEvidence(query, page.body) : undefined;
+    const excerpt = typeof reportEvidence === "string" ? reportEvidence
+      : prefixOnly && page ? contentPassage(query, page.body, page.title) : undefined;
     return [{
       title: page?.title ?? r.slug,
       snippet: birthdayLine(r.slug) ?? (excerpt === undefined ? r.snippet : excerpt.slice(0, 200)),
