@@ -42,6 +42,16 @@ export interface PipelineInput {
   source: "vault" | "api";
 }
 
+export interface WikilinkProjectionResult {
+  count: number;
+  mentionedSlugs: Set<string>;
+  /**
+   * #508: target slugs this projection incremented, in order. Internal only —
+   * never surfaced through CLI/MCP/HTTP responses.
+   */
+  mentionDeltas: string[];
+}
+
 export interface NerPipelineResult {
   entities: number;
   relations: number;
@@ -83,6 +93,19 @@ export type NerSourceGuard = (phase: "after_extract" | "before_commit") => void;
  * Unified write pipeline — single source of truth for indexing, wikilinks, and NER.
  * Used by SyncManager (vault path) and IngestManager (agent API path).
  */
+/**
+ * #508: a type correction can move a page's slug mid-extraction (#463/#465).
+ * `movePage` keeps the row and its mention_count, so an increment this attempt
+ * recorded under the old slug must be reversed under the NEW one — targeting a
+ * stale slug would make the reversal a silent no-op and leave the count high.
+ */
+function retargetMentionDeltas(deltas: string[] | undefined, from: string, to: string): void {
+  if (!deltas) return;
+  for (let i = 0; i < deltas.length; i++) {
+    if (deltas[i] === from) deltas[i] = to;
+  }
+}
+
 export class ContentPipeline {
   // MCP and SyncManager own separate pipelines over one DB. Serialize only the
   // actual same-page index mutation, so vector delete/add cannot interleave.
@@ -314,25 +337,69 @@ export class ContentPipeline {
    * creation is left to NER which classifies properly.
    * Returns the number of links created.
    */
-  processWikilinks(fromSlug: string, body: string): { count: number; mentionedSlugs: Set<string> } {
-    return this.db.transaction(() => this.processWikilinksUnsafe(fromSlug, body));
+  processWikilinks(fromSlug: string, body: string): WikilinkProjectionResult {
+    const mentionDeltas: string[] = [];
+    const outermost = this.outermostTransaction();
+    const result = this.db.transaction(() =>
+      this.processWikilinksUnsafe(fromSlug, body, null, mentionDeltas)
+    );
+    return { ...result, mentionDeltas: outermost ? mentionDeltas : [] };
   }
 
   /**
    * Atomically replace wikilink-derived relations for a page.
    * Link writes and mention counters share one SQLite transaction so callers
    * never observe half-applied graph state.
+   *
+   * #508: the delete is preceded by a snapshot of the source's PHYSICAL
+   * wikilink mention targets. Once the rows are gone their prior existence is
+   * unrecoverable, so a rebuilt target would otherwise look newly inserted and
+   * be counted a second time.
    */
-  replaceWikilinks(fromSlug: string, body: string): { count: number; mentionedSlugs: Set<string> } {
-    return this.db.transaction(() => {
+  replaceWikilinks(fromSlug: string, body: string): WikilinkProjectionResult {
+    const carried = this.physicalWikilinkMentionTargets(fromSlug);
+    const mentionDeltas: string[] = [];
+    const outermost = this.outermostTransaction();
+    const result = this.db.transaction(() => {
       this.db.deleteWikilinkMentions(fromSlug);
-      return this.processWikilinksUnsafe(fromSlug, body);
+      return this.processWikilinksUnsafe(fromSlug, body, carried, mentionDeltas);
     });
+    return { ...result, mentionDeltas: outermost ? mentionDeltas : [] };
+  }
+
+  /**
+   * #508 R4-a: `mentionDeltas` may only carry COMMITTED increments.
+   *
+   * Inside a caller-owned transaction this call's savepoint release is not a
+   * commit. Were the outer transaction to roll back, the counter update would be
+   * gone while an accumulated array kept the target — compensating it afterwards
+   * would decrement the same mention twice. Nested calls therefore report
+   * nothing. Under-reporting cannot cause an over-decrement, and the production
+   * caller (`IngestManager`) invokes both projections outside any transaction.
+   */
+  private outermostTransaction(): boolean {
+    return !this.db.rawDb.inTransaction;
+  }
+
+  /**
+   * #508: physical wikilink-sourced mention targets for one source.
+   * `includeInactive` is required — the activity view hides rejected/superseded
+   * rows that still physically occupy the (from, to, relation) key.
+   */
+  private physicalWikilinkMentionTargets(fromSlug: string): Set<string> {
+    return new Set(
+      this.db
+        .getOutgoingLinks(fromSlug, true)
+        .filter((l) => l.relation === "提及" && l.source_type === "wikilink")
+        .map((l) => l.to_slug),
+    );
   }
 
   private processWikilinksUnsafe(
     fromSlug: string,
     body: string,
+    carried: Set<string> | null,
+    mentionDeltas: string[],
   ): { count: number; mentionedSlugs: Set<string> } {
     if (!this.pages || !body.trim()) return { count: 0, mentionedSlugs: new Set() };
     // #510: central topic skip — generated topic pages never emit relation
@@ -366,9 +433,18 @@ export class ContentPipeline {
         const key = `${fromSlug}\x00${targetSlug}`;
         if (!writtenRelations.has(key)) {
           writtenRelations.add(key);
-          this.pages.incrementMention(targetSlug);
+          // #508: count only a physically new row. A target carried over from
+          // the pre-delete snapshot keeps its earlier contribution — the
+          // rebuild re-creates the row, it does not mention anything new.
+          // The snapshot entry is CONSUMED once so repeated upserts are not
+          // exempted forever.
+          const inserted = this.db.upsertWikilinkMention(fromSlug, targetSlug);
+          const carriedOver = carried?.delete(targetSlug) ?? false;
+          if (inserted && !carriedOver) {
+            this.pages.incrementMention(targetSlug);
+            mentionDeltas.push(targetSlug);
+          }
           mentionedSlugs.add(targetSlug);
-          this.db.upsertWikilinkMention(fromSlug, targetSlug);
           count++;
         }
       }
@@ -474,6 +550,7 @@ export class ContentPipeline {
     skipMentionSlugs?: Set<string>,
     sourceGuard?: NerSourceGuard,
     indexCreatedStubs = false,
+    mentionDeltas?: string[],
   ): Promise<NerPipelineResult | null> {
     if (!this.nerEngine) return null;
     if (!body.trim()) return null;
@@ -521,10 +598,52 @@ export class ContentPipeline {
       sourceGuard,
       body.trim().length,
       indexCreatedStubs,
+      mentionDeltas,
     );
   }
 
   // ─── Private ────────────────────────────────────────────────
+
+  /**
+   * #508: a NER mention is counted only when its forward edge is physically
+   * new. The edge write stays unconditional so evidence is still recorded;
+   * only the +1 is gated. This single gate covers three duplicates at once:
+   * re-processing the same page, an alias landing on a slug already counted in
+   * this same extraction, and a target the wikilink projection already wrote.
+   * A self-reference is skipped entirely: it must create no edge and no count.
+   */
+  private countNerMention(
+    fromSlug: string,
+    targetSlug: string,
+    mentionSkipSlugs: Set<string>,
+    mentionDeltas?: string[],
+  ): void {
+    if (targetSlug === fromSlug) return;
+    // #508 R2: the edge and its +1 are ONE state transition. Committing them as
+    // two separate writes lets a counter failure strand an edge, and a retry then
+    // reads insertLink() === false and can never repair the count. Keep both in
+    // one short transaction and publish the delta only after it commits, so a
+    // failure cancels edge, count and record together.
+    const counted = this.db.runInTransaction(() => {
+      const inserted = this.db.insertLink(
+        fromSlug,
+        targetSlug,
+        "提及",
+        null,
+        0.3,
+        "weak",
+        "ner",
+        0.5,
+        undefined,
+        { source_page_slug: fromSlug },
+      );
+      if (!inserted) return false;
+      if (mentionSkipSlugs.has(targetSlug)) return false;
+      this.db.incrementMentionCount(targetSlug);
+      return true;
+    });
+    if (counted) mentionDeltas?.push(targetSlug);
+  }
 
   private async applyExtraction(
     fromSlug: string,
@@ -534,6 +653,7 @@ export class ContentPipeline {
     sourceGuard?: NerSourceGuard,
     bodyChars = 0,
     indexCreatedStubs = false,
+    mentionDeltas?: string[],
   ): Promise<NerPipelineResult> {
     const entitySlugMap = new Map<string, string>();
     const movedSlugMap = new Map<string, string>();
@@ -568,12 +688,7 @@ export class ContentPipeline {
       if (result.action === "resolved_to_existing" || result.action === "alias_added") {
         const currentSlug = movedSlugMap.get(result.slug) ?? result.slug;
         entitySlugMap.set(entity.name, currentSlug);
-        if (!mentionSkipSlugs.has(currentSlug)) {
-          this.db.incrementMentionCount(currentSlug);
-        }
-        if (currentSlug !== fromSlug) {
-          this.db.insertLink(fromSlug, currentSlug, "提及", null, 0.3, "weak", "ner", 0.5, undefined, { source_page_slug: fromSlug });
-        }
+        this.countNerMention(fromSlug, currentSlug, mentionSkipSlugs, mentionDeltas);
         // Correct type if NER classification differs from existing stub
         const nerType = mapEntityType(entity.type);
         const existingType = this.db.getEntityType(currentSlug);
@@ -605,6 +720,12 @@ export class ContentPipeline {
             }
             const correctedSlug = this.pages.updateType(currentSlug, winner);
             if (mentionSkipSlugs.has(currentSlug)) mentionSkipSlugs.add(correctedSlug);
+            // #508 R3: updateType has COMMITTED the slug move, so this attempt's
+            // mention records must be retargeted here — ahead of the vector
+            // move's awaits. Any fault after a later await would strand them on a
+            // slug updateType just deleted, where the compensating UPDATE matches
+            // nothing and still reports success.
+            retargetMentionDeltas(mentionDeltas, currentSlug, correctedSlug);
             if (movedVectors) {
               await this.moveGovernedPageVectors(
                 currentSlug,
@@ -633,14 +754,9 @@ export class ContentPipeline {
       } else if (result.action === "duplicate_candidate") {
         const currentSlug = movedSlugMap.get(result.slug) ?? result.slug;
         entitySlugMap.set(entity.name, currentSlug);
-        if (!mentionSkipSlugs.has(currentSlug)) {
-          this.db.incrementMentionCount(currentSlug);
-        }
+        this.countNerMention(fromSlug, currentSlug, mentionSkipSlugs, mentionDeltas);
         // #467: the occupier may be the source page itself (its own title
         // extracted) — same self-reference guard as the resolved branch.
-        if (currentSlug !== fromSlug) {
-          this.db.insertLink(fromSlug, currentSlug, "提及", null, 0.3, "weak", "ner", 0.5, undefined, { source_page_slug: fromSlug });
-        }
       } else if (result.action === "stub_created" && this.pages && entity.name.length <= 20) {
         const entityType = mapEntityType(entity.type);
         // Resolution ran before this extraction created or moved any pages.
@@ -649,10 +765,7 @@ export class ContentPipeline {
         const occupied = this.db.getPage(generateSlug(entity.name, normalizePageType(entityType)));
         if (occupied) {
           entitySlugMap.set(entity.name, occupied.slug);
-          if (!mentionSkipSlugs.has(occupied.slug)) this.db.incrementMentionCount(occupied.slug);
-          if (occupied.slug !== fromSlug) {
-            this.db.insertLink(fromSlug, occupied.slug, "提及", null, 0.3, "weak", "ner", 0.5, undefined, { source_page_slug: fromSlug });
-          }
+          this.countNerMention(fromSlug, occupied.slug, mentionSkipSlugs, mentionDeltas);
           continue;
         }
         const stub = this.pages.create({
@@ -663,10 +776,7 @@ export class ContentPipeline {
         });
         entitySlugMap.set(entity.name, stub.slug);
         stubsCreated.add(stub.slug);
-        if (!mentionSkipSlugs.has(stub.slug)) {
-          this.db.incrementMentionCount(stub.slug);
-        }
-        this.db.insertLink(fromSlug, stub.slug, "提及", null, 0.3, "weak", "ner", 0.5, undefined, { source_page_slug: fromSlug });
+        this.countNerMention(fromSlug, stub.slug, mentionSkipSlugs, mentionDeltas);
       }
     }
 
