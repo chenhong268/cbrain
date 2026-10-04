@@ -27,7 +27,13 @@ import {
 import { buildToolResult } from "./result-builder.js";
 import { FRONTDOOR_DATA_KEYS, projectFrontdoorData, structuredSummary } from "./recall-output.js";
 import { getQuarterlyReportEvidence } from "../../core/retrieval/quarter-report-evidence.js";
-import { filterContentCandidates, filterContentFtsFallbackCandidates } from "../../core/retrieval/content-relevance.js";
+import {
+  filterContentCandidates,
+  filterContentFtsFallbackCandidates,
+  findKeywordCauseEvidence,
+  isClosedKeywordCauseQuery,
+  type ContentCandidateAdmissionOptions,
+} from "../../core/retrieval/content-relevance.js";
 import { applyPersonalCurrentStateGuard } from "../../core/retrieval/personal-current-state-guard.js";
 import { generateProactiveHints } from "../../core/retrieval/proactive.js";
 import { applyProactiveBudget, trimHint } from "./trim.js";
@@ -184,6 +190,14 @@ function contentPassage(query: string, body: string, title: string): string {
  * Deterministic — no LLM, no new public field.
  */
 const RAW_DETAIL_TOPIC_EXCLUSION_RE = /(原文|原话|逐字|完整正文|细节|具体内容|具体方案|怎么设计|怎么做的|当时怎么说|原来怎么说)/;
+
+// #537 R1 — one source for the closed keyword cause path. Display, ToolSummary,
+// legacy raw and structured details must not drift apart: a cause request that
+// produced no verified sentence is never reported as "no related pages".
+const CAUSE_UNVERIFIED_MESSAGE = "候选页面正文中没有可核验的原因证据";
+const CAUSE_UNVERIFIED_DISPLAY = "未找到可核验的原因证据。";
+const CAUSE_INCOMPLETE_MESSAGE = "候选页面尚未核验完成，暂时不能确认原因";
+const CAUSE_INCOMPLETE_DISPLAY = "候选页面尚未核验完成，暂时不能确认原因。";
 
 function contentRecallAllowsCurrentTopics(query: string): boolean {
   if (shouldCompleteEvidence(query, "auto")) return false;
@@ -350,7 +364,58 @@ async function runContentRecall(
   // disk/catalog verification; hydration below uses the SAME verified
   // snapshot, never the page cache. Main search and FTS fallback share ONE
   // policy decision.
-  const allowTopics = contentRecallAllowsCurrentTopics(query);
+  // #537 — a closed keyword cause request is answered from original pages only.
+  // Derived topic rows carry no verified cause evidence.
+  const causeRequested = isClosedKeywordCauseQuery(query);
+  const allowTopics = !causeRequested && contentRecallAllowsCurrentTopics(query);
+  const causeEvidence = new Map<string, string>();
+  // #537 R2 — the identity-verified page snapshot per read slug. Output
+  // hydration reuses these verified bytes and metadata instead of the ordinary
+  // page cache, which may expire or change between certification and output.
+  const causeSnapshots = new Map<string, { slug: string; title: string; expires_at: string | null }>();
+  const causeAttemptedSlugs = new Set<string>();
+  let causeReadFailures = 0;
+  // Verify at most one fresh body read per candidate slug per request. The
+  // verified original sentence is bound to the output; a failed read (missing
+  // row, identity drift, unreadable page) is memoized and never retried.
+  const certifyCauseEvidence = (slugs: readonly string[]): void => {
+    if (!causeRequested) return;
+    for (const slug of slugs) {
+      if (causeAttemptedSlugs.has(slug)) continue;
+      causeAttemptedSlugs.add(slug);
+      const row = ctx.db.getPage(slug);
+      if (!row) {
+        causeReadFailures++;
+        continue;
+      }
+      try {
+        const page = ctx.pages.getBySlugFresh(slug);
+        if (!page || page.slug !== row.slug || page.title !== row.title || page.type !== row.type
+          || (page.frontmatter?.title !== undefined && page.frontmatter.title !== page.title)
+          || (page.frontmatter?.slug !== undefined && page.frontmatter.slug !== page.slug)
+          || (page.frontmatter?.type !== undefined && page.frontmatter.type !== page.type)) {
+          causeReadFailures++;
+          continue;
+        }
+        const evidence = findKeywordCauseEvidence(query, stripKnownRelationsSection(page.body));
+        // Certification is memoized per slug: keep the verified snapshot even
+        // without evidence so nothing re-reads the page later in this request.
+        causeSnapshots.set(slug, { slug: page.slug, title: page.title, expires_at: page.expires_at ?? null });
+        if (evidence !== undefined) causeEvidence.set(slug, evidence);
+      } catch { causeReadFailures++; }
+    }
+  };
+  const causeAdmissionOptions = (seedSlug?: string): ContentCandidateAdmissionOptions | undefined => {
+    if (!causeRequested) {
+      return seedSlug === undefined ? undefined : { deterministicIdentitySlugs: new Set([seedSlug]) };
+    }
+    return {
+      causeEvidenceBySlug: causeEvidence,
+      ...(seedSlug === undefined ? {} : { deterministicIdentitySlugs: new Set([seedSlug]) }),
+    };
+  };
+  const keepCertifiedCause = (items: SearchResult[]): SearchResult[] =>
+    causeRequested ? items.filter((item) => causeEvidence.has(item.slug)) : items;
   const candidates = await ctx.search.search(query, {
     _trace: trace,
     ...(isRecentRecall(query) ? { multiQuery: false, _skipDecompose: true } : {}),
@@ -359,6 +424,10 @@ async function runContentRecall(
     _skipDetailEnrich: true,
     _allowCurrentTopics: allowTopics,
   });
+  certifyCauseEvidence([
+    ...candidates.map((candidate) => candidate.slug),
+    ...(identitySeed ? [identitySeed.slug] : []),
+  ]);
   let results = keepSourceEvidence(dedupeCandidatesBySlug([
     ...(allowTopics ? await namedCurrentTopics(ctx, query) : []),
     // A candidate already contains the exact subject-bound answer. Generic
@@ -367,7 +436,7 @@ async function runContentRecall(
     ...filterContentCandidates(
       query,
       identitySeed ? [identitySeed, ...candidates] : candidates,
-      identitySeed ? { deterministicIdentitySlugs: new Set([identitySeed.slug]) } : undefined,
+      causeAdmissionOptions(identitySeed?.slug),
     ),
   ]).slice(0, limit));
   if (results.length === 0 && !hasExplicitUnknownCue(query)) {
@@ -378,9 +447,10 @@ async function runContentRecall(
       _skipDetailEnrich: true,
       _allowCurrentTopics: allowTopics,
     });
+    certifyCauseEvidence(ftsCandidates.map((candidate) => candidate.slug));
     results = reportRequested
       ? dedupeCandidatesBySlug(keepSourceEvidence(ftsCandidates)).slice(0, limit)
-      : filterContentFtsFallbackCandidates(query, keepBirthdayEvidence(ftsCandidates));
+      : filterContentFtsFallbackCandidates(query, keepBirthdayEvidence(ftsCandidates), causeAdmissionOptions());
     if (results.length === 0) {
       results = selectPersonalTimePlaceRecordFallback(ctx, query, ftsCandidates);
       if (results.length === 0) results = selectRecentMeetingRecordFallback(ctx, query, limit);
@@ -392,6 +462,9 @@ async function runContentRecall(
     }
   }
   results = keepSourceEvidence(results);
+  // #537 — no unverified exit for a closed keyword cause request, including the
+  // recency and personal fallbacks selected just above.
+  results = keepCertifiedCause(results);
   if (results.length === 0 && !ambiguousBirthdaySubject
     && exactBirthdayPages.length === 1 && exactBirthdayPages[0]?.type === "entity/person") {
     // Exhaust the existing original-record fallback first. A direct person
@@ -484,9 +557,15 @@ async function runContentRecall(
         generated_at: snap.generatedAt,
       }];
     }
-    const page = reportPages.get(r.slug) ?? ctx.pages.getBySlug(r.slug);
+    // #537 R2 — a certified cause row hydrates from the verified snapshot taken
+    // during certification. Never fall back to the ordinary page cache here: an
+    // expired or replaced entry would mix another source into the answer.
+    const causeSnapshot = causeSnapshots.get(r.slug);
+    const page = causeSnapshot ? undefined : (reportPages.get(r.slug) ?? ctx.pages.getBySlug(r.slug));
     if (page) {
       pagesBySlug.set(r.slug, { slug: page.slug, expires_at: page.expires_at });
+    } else if (causeSnapshot) {
+      pagesBySlug.set(r.slug, { slug: causeSnapshot.slug, expires_at: causeSnapshot.expires_at });
     }
     // A title/prefix hit locates a document but can omit the requested section.
     // Select within that already-admitted page; retain non-prefix source evidence
@@ -494,11 +573,15 @@ async function runContentRecall(
     const prefixOnly = page?.body?.trim() && (!r.snippet?.trim()
       || r.snippet.trim() === page.title || page.body.trim().startsWith(r.snippet.trim()));
     const certifiedReport = reportLine(r.slug);
-    const excerpt = certifiedReport ?? (prefixOnly && page ? contentPassage(query, page.body, page.title) : undefined);
+    // #537 — the verified sentence is the answer: it replaces any page passage,
+    // candidate snippet, or title-derived excerpt for this slug.
+    const certifiedCause = causeEvidence.get(r.slug);
+    const excerpt = certifiedCause ?? certifiedReport ?? (prefixOnly && page ? contentPassage(query, page.body, page.title) : undefined);
     return [{
-      title: page?.title ?? r.slug,
-      snippet: birthdayLine(r.slug) ?? (excerpt === undefined ? r.snippet : excerpt.slice(0, 200)),
-      ...(detail !== "brief" ? { body: birthdayLine(r.slug) ?? excerpt ?? page?.body?.slice(0, 500) ?? "" } : {}),
+      title: causeSnapshot?.title ?? page?.title ?? r.slug,
+      snippet: birthdayLine(r.slug) ?? certifiedCause
+        ?? (excerpt === undefined ? r.snippet : excerpt.slice(0, 200)),
+      ...(detail !== "brief" ? { body: birthdayLine(r.slug) ?? certifiedCause ?? excerpt ?? page?.body?.slice(0, 500) ?? "" } : {}),
     }];
   }))).flat();
   // #399 — keep the default cbrain_recall content path aligned with deep_recall:
@@ -522,6 +605,10 @@ async function runContentRecall(
       ? assembleEvidencePack(ctx.db, slugs, query)
       : undefined;
   const degraded = entities.length === 0 && !!trace.degraded_reason;
+  // #537 R1 — a closed keyword cause request without a verified sentence keeps
+  // its own summary in every channel: display, ToolSummary, raw and structured.
+  const causeUnverified = causeRequested && entities.length === 0 && !degraded && !verificationIncomplete;
+  const causeVerificationIncomplete = causeUnverified && causeReadFailures > 0;
   const payload = {
     query,
     entities,
@@ -530,7 +617,11 @@ async function runContentRecall(
     ...(evidencePack ? { evidence_pack: evidencePack } : {}),
     summary: entities.length > 0
       ? `有 ${entities.length} 条相关记忆${topicSnapshots.size > 0 ? `（其中 ${topicSnapshots.size} 条为派生主题页）` : ""}`
-      : degraded ? INCOMPLETE_RECALL_MESSAGE : verificationIncomplete ? "相关资料核验未完成，暂时不能确认结果" : "暂时没找到相关记忆",
+      : degraded ? INCOMPLETE_RECALL_MESSAGE
+      : verificationIncomplete ? "相关资料核验未完成，暂时不能确认结果"
+      : causeVerificationIncomplete ? CAUSE_INCOMPLETE_MESSAGE
+      : causeUnverified ? CAUSE_UNVERIFIED_MESSAGE
+      : "暂时没找到相关记忆",
   };
   const formatted = formatRecallEnvelope(payload);
   const birthdayUnverified = birthdayRequested && entities.length === 0 && !degraded && !verificationIncomplete;
@@ -543,11 +634,28 @@ async function runContentRecall(
       summary: { ...formatted.summary, status: "degraded", message: payload.summary, next_steps: ["稍后重试，或按记录标题查看原文"], degraded_reason: "相关资料核验未完成" }, raw: formatted.raw }, payload, routing, []);
   }
   const display = surfaceInsufficient ? `只找到部分线索：${formatted.display}`
-    : birthdayUnverified ? "未找到可核实的生日信息。" : formatted.display;
+    : birthdayUnverified ? "未找到可核实的生日信息。"
+    : causeVerificationIncomplete ? CAUSE_INCOMPLETE_DISPLAY
+    : causeUnverified ? CAUSE_UNVERIFIED_DISPLAY
+    : formatted.display;
   const summary = surfaceInsufficient
     ? { ...formatted.summary, status: "degraded" as const, degraded_reason: "证据覆盖不足" }
     : birthdayUnverified ? { ...formatted.summary, message: "未找到可核实的生日信息" }
-    : formatted.summary;
+    : causeVerificationIncomplete
+      ? {
+          ...formatted.summary,
+          status: "degraded" as const,
+          message: CAUSE_INCOMPLETE_MESSAGE,
+          degraded_reason: "候选页面核验未完成",
+          next_steps: ["稍后重试，或按记录标题查看原文"],
+        }
+      : causeUnverified
+        ? {
+            ...formatted.summary,
+            message: CAUSE_UNVERIFIED_MESSAGE,
+            next_steps: ["直接查阅相关页面确认原因", "补充结构化原因字段"],
+          }
+        : formatted.summary;
   return withRouting({ display, summary, raw: formatted.raw }, payload, routing, slugs);
 }
 
