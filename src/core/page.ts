@@ -681,4 +681,15 @@ export class PageManager {
     this.cacheDelete(slug);
   }
 
+  /**
+   * #508: reverse exactly the mention increments one ingest attempt committed.
+   * Mirrors `incrementMention` so cache reads observe the compensated count.
+   * Deliberately not clamped at zero — a silent clamp would hide a double
+   * compensation instead of surfacing it.
+   */
+  decrementMention(slug: string, amount = 1): void {
+    this.db.decrementMentionCount(slug, amount);
+    this.cacheDelete(slug);
+  }
+
 }
