@@ -3570,9 +3570,11 @@ export class CBrainDB {
     return Number(r.lastInsertRowid);
   }
 
-  getInsight(id: number): InsightRow | null {
+  getInsight(id: number, activeOnly = false): InsightRow | null {
     return this.prepare(
-      "SELECT * FROM insights WHERE id = $id"
+      "SELECT * FROM insights WHERE id = $id" + (activeOnly
+        ? " AND status = 'active' AND (expires_at IS NULL OR julianday(expires_at) >= julianday('now'))"
+        : "")
     ).get({ $id: id }) as InsightRow | null;
   }
 
@@ -3588,6 +3590,9 @@ export class CBrainDB {
       params.$status = opts.status;
     } else {
       sql += " AND status = 'active'";
+    }
+    if (!opts?.status || opts.status === "active") {
+      sql += " AND (expires_at IS NULL OR julianday(expires_at) >= julianday('now'))";
     }
     if (opts?.sourceType) {
       sql += " AND source_type = $sourceType";
@@ -3611,7 +3616,7 @@ export class CBrainDB {
     const params: Record<string, string | number> = { $limit: limit };
     slugs.forEach((s, i) => { params[`$s${i}`] = `%"${s}"%`; });
     return this.prepare(
-      `SELECT * FROM insights WHERE status = 'active' AND (${conditions}) ORDER BY created_at DESC LIMIT $limit`
+      `SELECT * FROM insights WHERE status = 'active' AND (expires_at IS NULL OR julianday(expires_at) >= julianday('now')) AND (${conditions}) ORDER BY created_at DESC LIMIT $limit`
     ).all(params) as InsightRow[];
   }
 
@@ -3629,7 +3634,9 @@ export class CBrainDB {
   countInsights(status?: string): number {
     if (status) {
       const row = this.prepare(
-        "SELECT COUNT(*) as cnt FROM insights WHERE status = $status"
+        "SELECT COUNT(*) as cnt FROM insights WHERE status = $status" + (status === "active"
+          ? " AND (expires_at IS NULL OR julianday(expires_at) >= julianday('now'))"
+          : "")
       ).get({ $status: status }) as { cnt: number };
       return row.cnt;
     }
@@ -3639,7 +3646,7 @@ export class CBrainDB {
 
   archiveExpiredInsights(): number {
     const r = this.prepare(
-      "UPDATE insights SET status = 'archived' WHERE expires_at IS NOT NULL AND expires_at < datetime('now') AND status = 'active'"
+      "UPDATE insights SET status = 'archived' WHERE expires_at IS NOT NULL AND julianday(expires_at) < julianday('now') AND status = 'active'"
     ).run();
     return r.changes;
   }
