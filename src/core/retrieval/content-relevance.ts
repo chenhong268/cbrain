@@ -3,9 +3,17 @@ import {
   CONTENT_LEXICAL_MIN_COVERAGE,
   CONTENT_VECTOR_EPSILON,
   CONTENT_VECTOR_MIN_COSINE,
+  findKeywordCauseEvidence,
   getRetrievalSupport,
+  isClosedKeywordCauseQuery,
   type RetrievalChannelEvidence,
 } from "./retrieval-support.js";
+
+// #537 — the closed cause-grammar predicate and its evidence extractor keep
+// exactly one rule source in retrieval-support. The structural import fence
+// allows two importers of that module, so tool layers read these two pure
+// string helpers through this admission module instead.
+export { findKeywordCauseEvidence, isClosedKeywordCauseQuery };
 
 const FTS_FALLBACK_MIN_COVERAGE = 0.4;
 const FTS_FALLBACK_DOMINANCE_RATIO = 2;
@@ -18,12 +26,19 @@ export interface ContentCandidateDecision {
     | "exact"
     | "strong_vector"
     | "strong_lexical"
+    | "cause_evidence"
     | "insufficient_support";
 }
 
 export interface ContentCandidateAdmissionOptions {
   /** Exact pages certified by the closed-grammar identity resolver. */
   readonly deterministicIdentitySlugs?: ReadonlySet<string>;
+  /**
+   * Verified original cause-evidence sentence per candidate slug for a closed
+   * keyword cause request. Every channel (exact, vector, lexical, FTS anchor)
+   * locates a candidate; only a verified sentence answers the request.
+   */
+  readonly causeEvidenceBySlug?: ReadonlyMap<string, string>;
 }
 
 /**
@@ -34,10 +49,19 @@ export interface ContentCandidateAdmissionOptions {
  * are never attached to the SearchResult or emitted by MCP formatters.
  */
 export function assessContentCandidate(
-  _query: string,
+  query: string,
   result: SearchResult,
   options?: ContentCandidateAdmissionOptions,
 ): ContentCandidateDecision {
+  // #537 — a closed keyword cause request is answered only by original body
+  // evidence verified for this candidate. No channel may bypass that rule.
+  const causeEvidence = options?.causeEvidenceBySlug;
+  if (causeEvidence && isClosedKeywordCauseQuery(query)) {
+    return causeEvidence.has(result.slug)
+      ? { accepted: true, reason: "cause_evidence" }
+      : { accepted: false, reason: "insufficient_support" };
+  }
+
   if (
     result.source === "exact"
     && options?.deterministicIdentitySlugs?.has(result.slug)
@@ -94,8 +118,9 @@ export function filterContentCandidates(
 export function filterContentFtsFallbackCandidates(
   query: string,
   candidates: readonly SearchResult[],
+  options?: ContentCandidateAdmissionOptions,
 ): SearchResult[] {
-  const admitted = filterContentCandidates(query, candidates);
+  const admitted = filterContentCandidates(query, candidates, options);
   if (admitted.length > 0) return admitted;
 
   const ftsCandidates = candidates.filter((candidate) => (
@@ -121,7 +146,7 @@ export function filterContentFtsFallbackCandidates(
     top
     && top.score >= strongestScore * FTS_FALLBACK_MIN_SHARE_OF_TOP_SCORE
     && (!runnerUp || top.score >= runnerUp.score * FTS_FALLBACK_DOMINANCE_RATIO)
-  ) return [top];
+  ) return keepCertifiedCauseEvidence(query, [top], options);
 
   const [anchoredTop, anchoredRunnerUp] = [...strongestBySlug.values()].sort(descendingScore);
   if (
@@ -130,8 +155,23 @@ export function filterContentFtsFallbackCandidates(
     && hasLeadingCjkAnchor(query, anchoredTop.snippet)
     && anchoredTop.score >= strongestScore * FTS_FALLBACK_MIN_SHARE_OF_TOP_SCORE
     && (!anchoredRunnerUp || anchoredTop.score >= anchoredRunnerUp.score * FTS_FALLBACK_DOMINANCE_RATIO)
-  ) return [anchoredTop];
+  ) return keepCertifiedCauseEvidence(query, [anchoredTop], options);
   return [];
+}
+
+/**
+ * #537 — the FTS rescue branch (0.4 coverage and CJK anchor alike) picks its own
+ * candidate after the shared admission rule already ran, so a closed keyword
+ * cause request still needs a verified sentence for that candidate.
+ */
+function keepCertifiedCauseEvidence(
+  query: string,
+  results: SearchResult[],
+  options?: ContentCandidateAdmissionOptions,
+): SearchResult[] {
+  const causeEvidence = options?.causeEvidenceBySlug;
+  if (!causeEvidence || !isClosedKeywordCauseQuery(query)) return results;
+  return results.filter((result) => causeEvidence.has(result.slug));
 }
 
 function hasLeadingCjkAnchor(query: string, evidence: string): boolean {

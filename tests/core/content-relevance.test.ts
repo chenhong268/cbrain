@@ -7,6 +7,7 @@ import {
 import {
   assessContentCandidate,
   filterContentCandidates,
+  filterContentFtsFallbackCandidates,
 } from "../../src/core/retrieval/content-relevance.js";
 
 function candidate(
@@ -140,5 +141,74 @@ describe("content candidate honesty", () => {
     expect(filterContentCandidates("人物甲是谁", [certified, unrelated, nonExact], {
       deterministicIdentitySlugs: new Set(["record/certified", "record/non-exact"]),
     })).toEqual([certified]);
+  });
+});
+
+describe("closed keyword cause admission", () => {
+  const query = "实体A 季度二 收入 下滑 原因";
+  const verified = new Map([["records/source-a", "实体A在季度二收入下滑，原因为竞争加剧。"]]);
+  const unsupported: RetrievalSupport = {
+    exact: { original: { rankScore: 1 } },
+    vector: { original: { rankScore: 1, vectorCosineSimilarity: 0.99 } },
+    fts: { original: { rankScore: 1, rootLexicalCoverage: 1 } },
+  };
+
+  test("a verified sentence admits the candidate and names the proof", () => {
+    expect(assessContentCandidate(query, candidate("records/source-a"), { causeEvidenceBySlug: verified }))
+      .toEqual({ accepted: true, reason: "cause_evidence" });
+  });
+
+  test("no channel or identity shortcut bypasses the rule without evidence", () => {
+    const result = candidate("records/source-a", unsupported, "exact");
+    const options = {
+      causeEvidenceBySlug: new Map<string, string>(),
+      deterministicIdentitySlugs: new Set(["records/source-a"]),
+    };
+    expect(assessContentCandidate(query, result, options))
+      .toEqual({ accepted: false, reason: "insufficient_support" });
+    expect(filterContentCandidates(query, [result], options)).toEqual([]);
+  });
+
+  test("evidence recorded for another slug does not admit this candidate", () => {
+    const options = { causeEvidenceBySlug: new Map([["records/source-b", "实体A在季度二收入下滑，原因为竞争加剧。"]]) };
+    expect(assessContentCandidate(query, candidate("records/source-a", unsupported), options))
+      .toEqual({ accepted: false, reason: "insufficient_support" });
+  });
+
+  test("outside the closed cause grammar the map changes nothing", () => {
+    const result = candidate("records/source-a", unsupported);
+    expect(assessContentCandidate("实体A 季度二 收入 情况", result, { causeEvidenceBySlug: new Map() }))
+      .toEqual({ accepted: true, reason: "exact" });
+  });
+
+  const anchorQuery = "组织甲方 季度二 收入 下滑 原因";
+  const anchorCandidate = (score: number, coverage: number): SearchResult => {
+    const item: SearchResult = {
+      slug: "records/source-a",
+      score,
+      snippet: "组织甲方在季度三收入下滑，原因为竞争加剧。",
+      source: "fts",
+    };
+    return attachRetrievalSupport(item, { fts: { original: { rankScore: score, rootLexicalCoverage: coverage } } });
+  };
+
+  test("FTS rescue branches still need a verified sentence", () => {
+    const anchorPair = [anchorCandidate(0.5, 0), anchorCandidate(0.4, 0)];
+    expect(filterContentFtsFallbackCandidates(anchorQuery, anchorPair).map((item) => item.slug))
+      .toEqual(["records/source-a"]);
+    expect(filterContentFtsFallbackCandidates(anchorQuery, anchorPair, { causeEvidenceBySlug: new Map() }))
+      .toEqual([]);
+    // With evidence the shared rule admits both chunks of the verified slug;
+    // the caller dedupes them by slug.
+    expect(new Set(filterContentFtsFallbackCandidates(anchorQuery, anchorPair, { causeEvidenceBySlug: verified })
+      .map((item) => item.slug)).size).toBe(1);
+
+    const coverageLead = [anchorCandidate(0.5, 0.6)];
+    expect(filterContentFtsFallbackCandidates(anchorQuery, coverageLead).map((item) => item.slug))
+      .toEqual(["records/source-a"]);
+    expect(filterContentFtsFallbackCandidates(anchorQuery, coverageLead, { causeEvidenceBySlug: new Map() }))
+      .toEqual([]);
+    expect(filterContentFtsFallbackCandidates(anchorQuery, coverageLead, { causeEvidenceBySlug: verified })
+      .map((item) => item.slug)).toEqual(["records/source-a"]);
   });
 });

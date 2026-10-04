@@ -4,6 +4,8 @@ import {
   attachRetrievalSupport,
   computeCosineSimilarity,
   computeRootLexicalCoverage,
+  findKeywordCauseEvidence,
+  isClosedKeywordCauseQuery,
   CONTENT_VECTOR_EPSILON,
   CONTENT_VECTOR_MIN_COSINE,
   getRetrievalSupport,
@@ -523,5 +525,84 @@ describe("cosine similarity", () => {
     expect(computeCosineSimilarity([], [])).toBeUndefined();
     expect(computeCosineSimilarity([Number.NaN, 0], [1, 0])).toBeUndefined();
     expect(computeCosineSimilarity([Number.POSITIVE_INFINITY, 0], [1, 0])).toBeUndefined();
+  });
+});
+
+describe("closed keyword cause evidence", () => {
+  const query = "实体A 季度二 收入 下滑 原因";
+
+  test("recognizes only the closed cause grammar", () => {
+    expect(isClosedKeywordCauseQuery(query)).toBe(true);
+    expect(isClosedKeywordCauseQuery("实体A V2 收入 下滑 原因")).toBe(true);
+    expect(isClosedKeywordCauseQuery("实体A 季度二 收入 下滑")).toBe(false);
+    expect(isClosedKeywordCauseQuery("实体A 季度二 收入 下滑 原因 是什么")).toBe(false);
+    expect(isClosedKeywordCauseQuery("实体A 季度二 收入 原因 下滑")).toBe(false);
+  });
+
+  test("returns the original source sentence, not the normalized match copy", () => {
+    expect(findKeywordCauseEvidence(query, "实体A在季度二收入下滑，原因为竞争加剧。"))
+      .toBe("实体A在季度二收入下滑，原因为竞争加剧。");
+    expect(findKeywordCauseEvidence(query, "背景记录。\n实体A 在季度二收入下滑，原因为竞争加剧。"))
+      .toBe("实体A 在季度二收入下滑，原因为竞争加剧。");
+    expect(findKeywordCauseEvidence(query, "实体Ａ在季度二收入下滑，原因为竞争加剧。"))
+      .toBe("实体Ａ在季度二收入下滑，原因为竞争加剧。");
+    expect(findKeywordCauseEvidence("实体A V2 收入 下滑 原因", "实体A在V2收入下滑，原因为竞争加剧。"))
+      .toBe("实体A在V2收入下滑，原因为竞争加剧。");
+  });
+
+  test("withholds a sentence that cannot be the closed cause answer", () => {
+    expect(findKeywordCauseEvidence(query, "实体A在季度二收入未下滑，原因为竞争减弱。")).toBeUndefined();
+    expect(findKeywordCauseEvidence(query, "实体A在季度二收入下滑，原因尚未明确。")).toBeUndefined();
+    expect(findKeywordCauseEvidence(query, "实体A在季度二收入下滑，原因为竞争加剧，且渠道调整影响了销量。")).toBeUndefined();
+    expect(findKeywordCauseEvidence(query, "实体A在季度二收入下滑，原因为：竞争加剧。")).toBeUndefined();
+    expect(findKeywordCauseEvidence(query, "实体A在季度二收入下滑，原因为竞争加剧？")).toBeUndefined();
+    expect(findKeywordCauseEvidence(query, "")).toBeUndefined();
+    expect(findKeywordCauseEvidence("实体A 季度二 收入", "实体A在季度二收入下滑，原因为竞争加剧。")).toBeUndefined();
+  });
+
+  test("ignores an unreadable oversized candidate body", () => {
+    expect(findKeywordCauseEvidence(query, "甲".repeat(100_001))).toBeUndefined();
+  });
+
+  test("selects the sentence whose own subject matches the query", () => {
+    const body = "实体B在季度二收入下滑，原因为竞争加剧。\n实体A在季度二收入下滑，原因为渠道调整。";
+    expect(findKeywordCauseEvidence(query, body)).toBe("实体A在季度二收入下滑，原因为渠道调整。");
+  });
+
+  test("coverage and evidence extraction obey one shared rule", () => {
+    const texts = [
+      "实体A在季度二收入下滑，原因为竞争加剧。",
+      "实体A在季度二收入下滑，原因为：竞争加剧。",
+      "实体A在季度二收入未下滑，原因为竞争减弱。",
+      "实体A在季度二收入下滑，原因尚未明确。",
+      "实体B在季度二收入下滑，原因为竞争加剧。",
+      "只说明实体A在季度二收入下滑。",
+      "",
+    ];
+    for (const text of texts) {
+      expect(computeRootLexicalCoverage(query, text))
+        .toBe(findKeywordCauseEvidence(query, text) === undefined ? 0 : 1);
+    }
+  });
+
+  test("normalizes before splitting so compatible question endings cannot certify", () => {
+    // #537 R3 — NFKC rewrites these compatible endings into "?". The baseline
+    // grammar rejected them, and splitting the original text first must not
+    // drop the question mark and certify the assertion before it.
+    const accepted = "实体A在季度二收入下滑，原因为竞争加剧。";
+    for (const ending of ["？", "﹖", "⁇", "⁈", "⁉", "。？", "。﹖", "。⁇", "。⁈", "。⁉"]) {
+      const body = `${accepted}${ending}`;
+      expect(findKeywordCauseEvidence(query, body)).toBeUndefined();
+      expect(computeRootLexicalCoverage(query, body)).toBe(0);
+    }
+    expect(findKeywordCauseEvidence(query, accepted)).toBe(accepted);
+    expect(computeRootLexicalCoverage(query, accepted)).toBe(1);
+  });
+
+  test("keeps the original compatible characters of the verified sentence", () => {
+    const body = "实体Ａ在季度二收入下滑，原因为竞争加剧。";
+    expect(findKeywordCauseEvidence(query, body)).toBe(body);
+    expect(findKeywordCauseEvidence(query, body)).not.toBe(body.normalize("NFKC"));
+    expect(computeRootLexicalCoverage(query, body)).toBe(1);
   });
 });

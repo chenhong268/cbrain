@@ -58,7 +58,12 @@ for (const [question, body, accepted] of cases) {
         },
       } as never, {
         outputMode: "legacy", db, search,
-        pages: { getBySlug: () => ({ slug, title: "原始记录A", type: "record", body, expires_at: null }) },
+        pages: {
+          getBySlug: () => ({ slug, title: "原始记录A", type: "record", body, expires_at: null }),
+          // #537: the closed keyword cause path certifies the candidate body from
+          // one fresh read, exactly like the quarterly report path does.
+          getBySlugFresh: () => ({ slug, title: "原始记录A", type: "record", body, expires_at: null }),
+        },
       } as never);
       const response = await handler!({ query: question });
       const output = JSON.parse(response.content[0].text);

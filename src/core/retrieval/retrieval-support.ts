@@ -185,24 +185,43 @@ const CONTENT_LEXICAL_MAX_INPUT_CODEPOINTS = 100_000;
  * Preserve every keyword in order in one bounded source sentence. Returning
  * zero for an unproven request also keeps the weaker FTS rescue fail-closed.
  */
-function computeKeywordCauseCoverage(query: string, evidence: string): number | undefined {
-  if (typeof query !== "string" || typeof evidence !== "string") return undefined;
+export function isClosedKeywordCauseQuery(query: string): boolean {
+  if (typeof query !== "string") return false;
   const normalized = query.normalize("NFKC").toLowerCase().trim();
   const words = normalized.split(/[ \t]+/u);
-  if (words.length < 4 || words.length > 8 || words.at(-1) !== "原因"
-    || normalized.length > EXACT_PHRASE_MAX_QUERY_UNITS
-    || !words.every(word => /^[\p{Script=Han}a-z0-9]{2,24}$/u.test(word))) return undefined;
-  if (evidence.length > CONTENT_LEXICAL_MAX_INPUT_CODEPOINTS) return 0;
+  return words.length >= 4 && words.length <= 8 && words.at(-1) === "原因"
+    && normalized.length <= EXACT_PHRASE_MAX_QUERY_UNITS
+    && words.every(word => /^[\p{Script=Han}a-z0-9]{2,24}$/u.test(word));
+}
+
+/**
+ * Locate the one bounded original source sentence that states the cause for a
+ * closed keyword cause request. Returns the original sentence text, never a
+ * normalized or lowercased copy, so callers present verified source evidence
+ * instead of a match artifact.
+ */
+export function findKeywordCauseEvidence(
+  query: string,
+  evidence: string,
+): string | undefined {
+  if (typeof query !== "string" || typeof evidence !== "string") return undefined;
+  if (!isClosedKeywordCauseQuery(query)) return undefined;
+  if (evidence.length > CONTENT_LEXICAL_MAX_INPUT_CODEPOINTS) return undefined;
 
   // Deliberately do not accept arbitrary gaps, modifiers, negation, punctuation
   // joins, subject suffixes, reordered keywords, or a bare list of search terms.
-  const prefix = words.slice(0, -1).join("(?:在|的)?") + "[,，]?原因(?:为|是|在于|包括|[:：])";
-  const pattern = new RegExp("^" + prefix + "(.+)$", "u");
-  const sentences = evidence.normalize("NFKC").toLowerCase()
-    .matchAll(/([^。！？!?\r\n\u2028\u2029]+)([。！？!?\r\n\u2028\u2029]*)/gu);
-  for (const [, sentence, ending] of sentences) {
-    if (/[?？]/u.test(ending!)) continue;
-    const compact = sentence!.replace(/[ \t]/gu, "");
+  const pattern = buildKeywordCausePattern(query);
+  // #537 R3 — normalize FIRST, then split and test the ending. Compatible
+  // question marks (﹖, ⁇, ⁈, ⁉) only become "?" after NFKC, so splitting the
+  // original text first would drop the question and certify the assertion
+  // before it. The evidence returned to callers stays the ORIGINAL sentence.
+  const { normalized, offsets } = normalizeEvidenceForCause(evidence);
+  const sentences = normalized.matchAll(/([^。！？!?\r\n\u2028\u2029]+)([。！？!?\r\n\u2028\u2029]*)/gu);
+  for (const sentenceMatch of sentences) {
+    const sentence = sentenceMatch[1]!;
+    const ending = sentenceMatch[2]!;
+    if (/[?？]/u.test(ending)) continue;
+    const compact = sentence.toLowerCase().replace(/[ \t]/gu, "");
     if (compact.length > CONTENT_LEXICAL_MAX_WINDOW_SPAN) continue;
     const match = pattern.exec(compact);
     if (!match) continue;
@@ -212,9 +231,45 @@ function computeKeywordCauseCoverage(query: string, evidence: string): number | 
     // Valid negative explanations remain outside this closed grammar.
     if (!/^[\p{Script=Han}a-z0-9]{2,64}$/u.test(answer)
       || /(?:[不未无尚待吗么呢]|可能|或许|什么|是否|并非|暂缺|调查中|猜测|否认)/u.test(answer)) continue;
-    return 1;
+    const start = offsets[sentenceMatch.index!] ?? evidence.length;
+    const end = offsets[sentenceMatch.index! + sentence.length + ending.length] ?? evidence.length;
+    const original = evidence.slice(start, end).trim();
+    if (original.length === 0) continue;
+    return original;
   }
-  return 0;
+  return undefined;
+}
+
+/**
+ * #537 R3 — normalize a whole evidence string while keeping a map from every
+ * normalized index back to its original index. Sentence splitting and the
+ * question-ending test run on the normalized text (baseline semantics), but the
+ * evidence handed to callers stays the original source sentence.
+ */
+function normalizeEvidenceForCause(evidence: string): { normalized: string; offsets: number[] } {
+  const offsets: number[] = [];
+  let normalized = "";
+  let index = 0;
+  for (const character of evidence) {
+    const expanded = character.normalize("NFKC");
+    for (let offset = 0; offset < expanded.length; offset++) offsets.push(index);
+    normalized += expanded;
+    index += character.length;
+  }
+  offsets.push(evidence.length);
+  return { normalized, offsets };
+}
+
+function buildKeywordCausePattern(query: string): RegExp {
+  const words = query.normalize("NFKC").toLowerCase().trim().split(/[ \t]+/u);
+  const prefix = words.slice(0, -1).join("(?:在|的)?") + "[,，]?原因(?:为|是|在于|包括|[:：])";
+  return new RegExp("^" + prefix + "(.+)$", "u");
+}
+
+function computeKeywordCauseCoverage(query: string, evidence: string): number | undefined {
+  if (typeof query !== "string" || typeof evidence !== "string") return undefined;
+  if (!isClosedKeywordCauseQuery(query)) return undefined;
+  return findKeywordCauseEvidence(query, evidence) === undefined ? 0 : 1;
 }
 
 
