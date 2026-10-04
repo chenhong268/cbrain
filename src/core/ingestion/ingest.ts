@@ -341,6 +341,11 @@ export class IngestManager {
       throw new Error(`Cannot append to missing entity page: ${slug}`);
     }
     const snapshot = takeSnapshot(slug, this.db, this.pages);
+    // #508 R1: the append route commits its own mention deltas — wikilink and
+    // NER alike — so a late failure must be able to hand exactly those back.
+    // Without this ledger the append entry restored body and edges but left the
+    // counter inflated, and the retry then found the edge already present.
+    const attemptMentionDeltas: string[] = [];
 
     try {
       const page = this.pages.patch(slug, {
@@ -357,7 +362,8 @@ export class IngestManager {
       this.pipeline.writeIngestLog(slug, "api", { appended: true, chunks: chunks.length });
 
       // Now safe to modify links and mention_count
-      const { count: linksExtracted, mentionedSlugs } = this.pipeline.replaceWikilinks(slug, page.body);
+      const { count: linksExtracted, mentionedSlugs, mentionDeltas: wikilinkDeltas } = this.pipeline.replaceWikilinks(slug, page.body);
+      attemptMentionDeltas.push(...wikilinkDeltas);
 
       let nerResult: NerPipelineResult | null = null;
       let nerSkipped: "timeout" | "error" | undefined;
@@ -365,7 +371,7 @@ export class IngestManager {
       let nerPending = false;
       if (nerAction === "sync" && body.trim()) {
         try {
-          nerResult = await this.pipeline.processNer(slug, body, before.type, true, undefined, mentionedSlugs);
+          nerResult = await this.pipeline.processNer(slug, body, before.type, true, undefined, mentionedSlugs, undefined, false, attemptMentionDeltas);
         } catch (e) {
           nerError = getNerErrorCode(e);
           nerSkipped = nerError === "NER_TIMEOUT" ? "timeout" : "error";
@@ -392,7 +398,7 @@ export class IngestManager {
       return { slug, created: false, linksExtracted, ner: nerResult, nerSkipped, nerError, ...(nerPending ? { nerPending: true } : {}), outcome: "updated" as const };
     } catch (indexError) {
       if (snapshot) {
-        await this.restoreSnapshot(slug, snapshot, indexError);
+        await this.restoreSnapshot(slug, snapshot, indexError, attemptMentionDeltas);
       }
       throw indexError;
     }
@@ -455,6 +461,12 @@ export class IngestManager {
 
     const snapshot = existedBefore ? takeSnapshot(slug, this.db, this.pages) : null;
     let createdThisAttempt = false;
+    // #508: mention increments this attempt COMMITTED and may still have to be
+    // reversed. Both producers commit independently of the ingest (the wikilink
+    // projection owns its own transaction), so neither can be relied upon to
+    // roll back when a later step fails. Only ids collected HERE are reversible
+    // — never a global ledger, never a fresh scan of outgoing links.
+    const attemptMentionDeltas: string[] = [];
 
     try {
       if (existedBefore) {
@@ -470,7 +482,8 @@ export class IngestManager {
       this.pipeline.writeIngestLog(slug, "api", { chunks: chunks.length });
 
       // Now safe to modify links and mention_count
-      const { count: linksExtracted, mentionedSlugs } = this.pipeline.replaceWikilinks(slug, body);
+      const { count: linksExtracted, mentionedSlugs, mentionDeltas: wikilinkDeltas } = this.pipeline.replaceWikilinks(slug, body);
+      attemptMentionDeltas.push(...wikilinkDeltas);
 
       let nerResult: NerPipelineResult | null = null;
       let nerSkipped: "timeout" | "error" | undefined;
@@ -479,7 +492,7 @@ export class IngestManager {
       const nerEligibleType = !type.startsWith("entity/") && !type.startsWith("concept/") && !type.startsWith("insight/");
       if (nerAction === "sync" && nerEligibleType) {
         try {
-          nerResult = await this.pipeline.processNer(slug, body, type, true, undefined, mentionedSlugs);
+          nerResult = await this.pipeline.processNer(slug, body, type, true, undefined, mentionedSlugs, undefined, false, attemptMentionDeltas);
         } catch (e) {
           nerError = getNerErrorCode(e);
           nerSkipped = nerError === "NER_TIMEOUT" ? "timeout" : "error";
@@ -549,11 +562,11 @@ export class IngestManager {
       if (createdThisAttempt) {
         // New page: narrow cleanup — vault file + DB cascade + LanceDB
         // cleanupNewPage throws IngestRollbackError if cleanup fails
-        await this.cleanupNewPage(slug, indexError);
+        await this.cleanupNewPage(slug, indexError, attemptMentionDeltas);
       } else if (snapshot) {
         // Existing page: restore to pre-update state + re-index old content
         // restoreSnapshot throws IngestRollbackError if restore fails
-        await this.restoreSnapshot(slug, snapshot, indexError);
+        await this.restoreSnapshot(slug, snapshot, indexError, attemptMentionDeltas);
       }
       throw indexError;
     }
@@ -563,7 +576,7 @@ export class IngestManager {
    *  Only removes this page's file, DB rows, and LanceDB vectors —
    *  does NOT touch other vault files (no dead-link rewrite).
    *  Throws IngestRollbackError if any cleanup step fails. */
-  private async cleanupNewPage(slug: string, originalError: unknown): Promise<void> {
+  private async cleanupNewPage(slug: string, originalError: unknown, mentionDeltas: readonly string[] = []): Promise<void> {
     const original = originalError instanceof Error ? originalError : new Error(String(originalError));
     const errors: Error[] = [];
 
@@ -574,7 +587,24 @@ export class IngestManager {
       const error = e instanceof Error ? e : new Error(String(e));
       if (!("code" in error) || error.code !== "ENOENT") errors.push(error);
     }
-    try { this.db.deletePageCascaded(slug); } catch (e) { errors.push(e instanceof Error ? e : new Error(String(e))); }
+    // #508: the cascade removes THIS page's own edges, but the counts it
+    // incremented live on OTHER pages and must be reversed explicitly. Both go
+    // in one transaction so the edges and the counts cannot diverge.
+    try {
+      this.db.transaction(() => {
+        this.db.deletePageCascaded(slug);
+        this.compensateMentionDeltas(mentionDeltas);
+      });
+    } catch (e) { errors.push(e instanceof Error ? e : new Error(String(e))); }
+    // #508: PageManager caches pages by slug and deletePageCascaded bypasses that
+    // cache. Without this invalidation a retry reads a stale row, takes the
+    // "existing page" branch and tries to read the vault file this just removed.
+    try {
+      this.pages.getBySlugFresh(slug);
+    } catch {
+      // Cache invalidation is derived state and must never mask the DB outcome.
+      // A surviving page row without its vault file is already in `errors` above.
+    }
     try { await this.lance.deleteByPageSlug(slug); } catch (e) { errors.push(e instanceof Error ? e : new Error(String(e))); }
 
     if (errors.length > 0) {
@@ -586,7 +616,7 @@ export class IngestManager {
   /** Restore a page to its pre-mutation state after downstream failure.
    *  Re-embeds and re-indexes the old content to keep all stores consistent.
    *  Throws IngestRollbackError if any restore step fails. */
-  private async restoreSnapshot(slug: string, snapshot: PageSnapshot, originalError: unknown): Promise<void> {
+  private async restoreSnapshot(slug: string, snapshot: PageSnapshot, originalError: unknown, mentionDeltas: readonly string[] = []): Promise<void> {
     const original = originalError instanceof Error ? originalError : new Error(String(originalError));
     const errors: Error[] = [];
 
@@ -595,10 +625,14 @@ export class IngestManager {
       this.pages.update(slug, { body: snapshot.body, tags: snapshot.tags });
     } catch (e) { errors.push(e instanceof Error ? e : new Error(String(e))); }
 
-    // 2. Restore mention links
+    // 2. Restore mention links, then reverse the counts this attempt committed.
+    // #508: one transaction for both. Restoring the edges without their counts
+    // would leave the graph and the metric disagreeing, and a partial
+    // compensation must abort instead of being reported as complete.
     try {
       this.db.transaction(() => {
         this.db.restoreOutgoingMentionLinks(slug, snapshot.mentionLinks);
+        this.compensateMentionDeltas(mentionDeltas);
       });
     } catch (e) { errors.push(e instanceof Error ? e : new Error(String(e))); }
 
@@ -620,6 +654,22 @@ export class IngestManager {
     if (errors.length > 0) {
       this.recordRollbackFailure(slug, original, errors);
       throw new IngestRollbackError(original, errors);
+    }
+  }
+
+  /**
+   * #508: reverse exactly the mention increments THIS attempt committed.
+   * Grouped per slug so each page is written once. Never clamped at zero: an
+   * over-compensated count must stay observable instead of being hidden.
+   * Slugs are recorded at increment time, so if a target slug was moved the
+   * stored id IS the current one — compensation never targets a stale slug.
+   */
+  private compensateMentionDeltas(deltas: readonly string[]): void {
+    if (deltas.length === 0) return;
+    const perSlug = new Map<string, number>();
+    for (const slug of deltas) perSlug.set(slug, (perSlug.get(slug) ?? 0) + 1);
+    for (const [slug, amount] of perSlug) {
+      this.pages.decrementMention(slug, amount);
     }
   }
 

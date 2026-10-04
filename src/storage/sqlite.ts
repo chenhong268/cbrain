@@ -2004,6 +2004,17 @@ export class CBrainDB {
     ).run({ $slug: slug });
   }
 
+  /**
+   * #508: reverse exactly the mention increments one ingest attempt committed.
+   * Deliberately NOT clamped at zero — a silent clamp would hide a double
+   * compensation, which must stay observable.
+   */
+  decrementMentionCount(slug: string, amount = 1): void {
+    this.prepare(
+      "UPDATE pages SET mention_count = mention_count - $amount, updated_at = datetime('now') WHERE slug = $slug"
+    ).run({ $slug: slug, $amount: amount });
+  }
+
   deletePage(slug: string): boolean {
     const r = this.prepare("DELETE FROM pages WHERE slug = $slug").run({ $slug: slug });
     return r.changes > 0;
@@ -2406,12 +2417,18 @@ export class CBrainDB {
 
   // ─── Link operations ──────────────────────────────────────────
 
-  insertLink(from: string, to: string, relation: string, context?: string | null, weight?: number, strength?: string, sourceType?: string, confidence?: number, _skipReverse?: boolean, provenance?: ProvenanceInput): void {
+  /**
+   * #508: returns whether the FORWARD edge row was physically inserted.
+   * The forward statement's `changes` is captured BEFORE the recursive reverse
+   * write, because a connection-level `changes` cannot be attributed to the
+   * forward statement once the reverse insert has run.
+   */
+  insertLink(from: string, to: string, relation: string, context?: string | null, weight?: number, strength?: string, sourceType?: string, confidence?: number, _skipReverse?: boolean, provenance?: ProvenanceInput): boolean {
     const clampedWeight = Math.min(1.0, Math.max(0.0, weight ?? 1.0));
     const trustState = sourceType && ["wikilink", "manual"].includes(sourceType) ? "trusted" : "candidate";
-    this.prepare(
+    const inserted = this.prepare(
       "INSERT OR IGNORE INTO links (from_slug, to_slug, relation, context, weight, strength, source_type, confidence, source_page_slug, trust_state, evidence) VALUES ($from, $to, $rel, $ctx, $w, $s, $st, $c, $sps, $ts, $ev)"
-    ).run({ $from: from, $to: to, $rel: relation, $ctx: context ?? null, $w: clampedWeight, $s: strength ?? 'medium', $st: sourceType ?? 'unknown', $c: confidence ?? 0.5, $sps: provenance?.source_page_slug ?? null, $ts: trustState, $ev: provenance?.evidence ?? null });
+    ).run({ $from: from, $to: to, $rel: relation, $ctx: context ?? null, $w: clampedWeight, $s: strength ?? 'medium', $st: sourceType ?? 'unknown', $c: confidence ?? 0.5, $sps: provenance?.source_page_slug ?? null, $ts: trustState, $ev: provenance?.evidence ?? null }).changes > 0;
 
     if (!_skipReverse) {
       const reverse = getReverseRelation(relation);
@@ -2419,6 +2436,7 @@ export class CBrainDB {
         this.insertLink(to, from, reverse, context, weight, strength, sourceType, confidence, true, provenance);
       }
     }
+    return inserted;
   }
 
   deleteLink(from: string, to: string, relation: string): boolean {
@@ -2456,8 +2474,19 @@ export class CBrainDB {
   /**
    * Persist explicit wikilink evidence without downgrading a manually curated
    * edge that already occupies the unique (from, to, relation) key.
+   *
+   * #508: returns whether the forward row is physically new. `changes() > 0`
+   * cannot answer that — the ON CONFLICT DO UPDATE path also reports a change.
+   * The existence probe and the write share one statement pair inside the
+   * caller's transaction, so the answer is stable. Reading the row WITHOUT a
+   * trust filter is intentional: a rejected/superseded row occupying the key
+   * still means the physical row exists, so reactivation must not count again.
+   * `.get()` yields null — not undefined — when no row matches.
    */
-  upsertWikilinkMention(fromSlug: string, toSlug: string): void {
+  upsertWikilinkMention(fromSlug: string, toSlug: string): boolean {
+    const occupied = this.prepare(
+      "SELECT 1 AS hit FROM links WHERE from_slug = $from AND to_slug = $to AND relation = '提及'"
+    ).get({ $from: fromSlug, $to: toSlug }) as { hit: number } | null;
     this.prepare(
       `INSERT INTO links
         (from_slug, to_slug, relation, context, weight, strength, source_type,
@@ -2473,6 +2502,7 @@ export class CBrainDB {
          trust_state = CASE WHEN links.source_type = 'manual' THEN links.trust_state ELSE excluded.trust_state END,
          evidence = CASE WHEN links.source_type = 'manual' THEN links.evidence ELSE excluded.evidence END`
     ).run({ $from: fromSlug, $to: toSlug });
+    return occupied == null;
   }
 
   /** Restore an exact outgoing mention snapshot during ingest compensation. */
