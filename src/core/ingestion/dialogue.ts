@@ -349,6 +349,16 @@ export class DialogueIngest {
 
       const normRel = normalizeRelation(rel.relation);
 
+      // #539: an entity related to itself is not a fact. Skip it with a fixed
+      // reason; valid sibling relations in the same batch still apply.
+      if (fromSlug === toSlug) {
+        this.logger?.warn("dialogue", "relation skipped: self-reference", {
+          code: "self_reference",
+          relation: normRel,
+        });
+        continue;
+      }
+
       if (!relationEndpointsAllowed(this.db, fromSlug, toSlug, normRel)) {
         // #471: fixed privacy-safe diagnostic; valid sibling relations continue.
         this.logger?.warn("dialogue", "relation skipped: endpoints violate ontology domain/range", {
