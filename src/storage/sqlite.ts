@@ -2032,21 +2032,40 @@ export class CBrainDB {
   }
 
   rewireLinks(oldSlug: string, newSlug: string): void {
-    // Delete old-slug links that would collide with existing new-slug links after UPDATE
-    this.prepare(`
-      DELETE FROM links WHERE from_slug = $old AND EXISTS (
-        SELECT 1 FROM links l2 WHERE l2.from_slug = $new AND l2.to_slug = links.to_slug AND l2.relation = links.relation
-      )
-    `).run({ $old: oldSlug, $new: newSlug });
-    this.prepare(`
-      DELETE FROM links WHERE to_slug = $old AND EXISTS (
-        SELECT 1 FROM links l2 WHERE l2.to_slug = $new AND l2.from_slug = links.from_slug AND l2.relation = links.relation
-      )
-    `).run({ $old: oldSlug, $new: newSlug });
-    this.prepare("UPDATE links SET from_slug = $new WHERE from_slug = $old").run({ $old: oldSlug, $new: newSlug });
-    this.prepare("UPDATE links SET to_slug = $new WHERE to_slug = $old").run({ $old: oldSlug, $new: newSlug });
-    this.prepare("UPDATE links SET context = REPLACE(context, $old, $new) WHERE context LIKE '%' || $old || '%'")
-      .run({ $old: oldSlug, $new: newSlug });
+    // #539: rewiring a slug onto itself has nothing to move. The collapse delete
+    // below would match the slug's own loop rows and remove them.
+    if (oldSlug === newSlug) return;
+
+    // #539: the whole rewrite is one atomic step. A failure in any statement
+    // must not leave a half-migrated link set committed.
+    this.runInTransaction(() => {
+      // #539: drop the edges this mapping collapses (old→new, new→old, old→old)
+      // before any UPDATE. The existence-based deletes below only cover a
+      // collision with a *different* target edge: when both endpoints already
+      // own a loop and no cross edge exists, none of them matches, and the
+      // second UPDATE pushes the rewritten loop onto the occupied key with
+      // UNIQUE constraint failed: links.from_slug, links.to_slug, links.relation.
+      this.prepare(`
+        DELETE FROM links
+         WHERE (from_slug = $old AND to_slug IN ($old, $new))
+            OR (to_slug = $old AND from_slug = $new)
+      `).run({ $old: oldSlug, $new: newSlug });
+      // Delete old-slug links that would collide with existing new-slug links after UPDATE
+      this.prepare(`
+        DELETE FROM links WHERE from_slug = $old AND EXISTS (
+          SELECT 1 FROM links l2 WHERE l2.from_slug = $new AND l2.to_slug = links.to_slug AND l2.relation = links.relation
+        )
+      `).run({ $old: oldSlug, $new: newSlug });
+      this.prepare(`
+        DELETE FROM links WHERE to_slug = $old AND EXISTS (
+          SELECT 1 FROM links l2 WHERE l2.to_slug = $new AND l2.from_slug = links.from_slug AND l2.relation = links.relation
+        )
+      `).run({ $old: oldSlug, $new: newSlug });
+      this.prepare("UPDATE links SET from_slug = $new WHERE from_slug = $old").run({ $old: oldSlug, $new: newSlug });
+      this.prepare("UPDATE links SET to_slug = $new WHERE to_slug = $old").run({ $old: oldSlug, $new: newSlug });
+      this.prepare("UPDATE links SET context = REPLACE(context, $old, $new) WHERE context LIKE '%' || $old || '%'")
+        .run({ $old: oldSlug, $new: newSlug });
+    });
   }
 
   // ─── Page list/query operations ──────────────────────────────
@@ -2424,6 +2443,9 @@ export class CBrainDB {
    * forward statement once the reverse insert has run.
    */
   insertLink(from: string, to: string, relation: string, context?: string | null, weight?: number, strength?: string, sourceType?: string, confidence?: number, _skipReverse?: boolean, provenance?: ProvenanceInput): boolean {
+    // #539: a self-edge is not a fact. Reject it before any SQL, so neither the
+    // forward row nor the recursively derived reverse row can be written.
+    if (from === to) return false;
     const clampedWeight = Math.min(1.0, Math.max(0.0, weight ?? 1.0));
     const trustState = sourceType && ["wikilink", "manual"].includes(sourceType) ? "trusted" : "candidate";
     const inserted = this.prepare(
@@ -2484,6 +2506,9 @@ export class CBrainDB {
    * `.get()` yields null — not undefined — when no row matches.
    */
   upsertWikilinkMention(fromSlug: string, toSlug: string): boolean {
+    // #539: a wikilink from a page to itself is not mention evidence, and the
+    // ON CONFLICT path would otherwise rewrite an existing historical loop.
+    if (fromSlug === toSlug) return false;
     const occupied = this.prepare(
       "SELECT 1 AS hit FROM links WHERE from_slug = $from AND to_slug = $to AND relation = '提及'"
     ).get({ $from: fromSlug, $to: toSlug }) as { hit: number } | null;

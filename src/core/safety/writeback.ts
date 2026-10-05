@@ -2,6 +2,9 @@ import type { CBrainDB } from "../../storage/sqlite.js";
 import { PageManager, } from "../page.js";
 import { normalizeRelation, relationEndpointsAllowed, RELATION_DOMAIN_VIOLATION, insertSemanticLink, RELATION_LABEL_CONFLICT } from "../shared.js";
 
+/** #539: fixed reason for a relation whose two endpoints are the same page. */
+const SELF_REFERENCE_ERROR = "self-reference";
+
 export type WritebackAction = "append" | "create_concept" | "create_link";
 
 export interface WritebackInput {
@@ -109,6 +112,13 @@ export class WritebackManager {
     }
     if (!toPage) {
       return { success: false, action: input.action, error: `Target page not found: ${toSlug}` };
+    }
+
+    // #539: a page related to itself is not a fact. Fail here, before the domain
+    // preflight, so the reason is always the same one; nothing is written,
+    // synced, or appended to either page.
+    if (fromSlug === toSlug) {
+      return { success: false, action: input.action, error: SELF_REFERENCE_ERROR };
     }
 
     const normalized = normalizeRelation(relation);

@@ -374,6 +374,10 @@ export function insertSemanticLink(
   rawRelation: string,
   insert: SemanticLinkInsert,
 ): boolean {
+  // #539: a semantic edge from a node to itself carries no meaning for any
+  // relation. Reject it locally so the label-preserving alias path below never
+  // reports a successful write for a row the storage entry refuses.
+  if (from === to) return false;
   const canonical = normalizeRelation(rawRelation);
   const isAlias = rawRelation !== canonical;
   const context = isAlias

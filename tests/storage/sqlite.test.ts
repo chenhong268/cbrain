@@ -538,7 +538,7 @@ describe("deletePageCascaded transaction atomicity (#187)", () => {
       seedPageFor311("entity-self");
       seedPageFor311("entity-other");
       db.insertLink("entity-self", "entity-other", "mentions", null, 1.0, "medium", "ner", 0.7);
-      // Raw-insert a self-loop (UNIQUE(from,to,relation) allows from=to; no app guard today).
+      // Raw SQL injects a historical self-loop; normal write entries now reject it.
       db.rawDb
         .prepare("INSERT INTO links (from_slug, to_slug, relation) VALUES ('entity-self', 'entity-self', 'mentions')")
         .run();
