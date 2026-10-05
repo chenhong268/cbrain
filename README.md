@@ -51,7 +51,7 @@ curl -fsSL https://bun.sh/install | bash
 2. Install CBrain — always pin to an explicit tag:
 
 ```bash
-bun install -g github:chenhong268/cbrain#v2.0.22
+bun install -g github:chenhong268/cbrain#v2.1.0
 ```
 
 3. Verify:
@@ -75,8 +75,8 @@ cbrain serve --http                      # 启动 HTTP 服务 → localhost:3399
 ```bash
 (
   set -e
-  new_version=v2.0.22
-  previous_version=v2.0.21
+  new_version=v2.1.0
+  previous_version=v2.0.22
   test "$(bunx --package "github:chenhong268/cbrain#${new_version}" cbrain --version)" = "${new_version#v}"
   test "$(bunx --package "github:chenhong268/cbrain#${previous_version}" cbrain --version)" = "${previous_version#v}"
   bun remove -g cbrain
@@ -90,7 +90,7 @@ If install or restart verification fails, roll back to the recorded previous tag
 ```bash
 (
   set -e
-  previous_version=v2.0.21
+  previous_version=v2.0.22
   test "$(bunx --package "github:chenhong268/cbrain#${previous_version}" cbrain --version)" = "${previous_version#v}"
   global_bin="${BUN_INSTALL:-$HOME/.bun}/bin"
   global_manifest="${global_bin%/bin}/install/global/package.json"
@@ -638,11 +638,12 @@ bun run dev init
 
 ## Roadmap
 
-See [CHANGELOG.md](./CHANGELOG.md) for the full version history (current: v2.0.22).
+See [CHANGELOG.md](./CHANGELOG.md) for the full version history (current: v2.1.0).
 
 | Version | Focus | Status |
 |:--------|:------|:-------|
-| v2.0.22 | 原因召回的原文证据绑定 | ✅ Current |
+| v2.1.0 | 关系自引用写入防线 | ✅ Current |
+| v2.0.22 | 原因召回的原文证据绑定 | ✅ Released |
 | v2.0.21 | 洞察 TTL、提及计数幂等与关键词证据召回 | ✅ Released |
 | v2.0.20 | 主题读取异步核验与请求预算 | ✅ Released |
 | v2.0.19 | 精确人物生日查询的候选外兜底 | ✅ Released |
