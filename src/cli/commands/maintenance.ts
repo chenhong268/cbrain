@@ -656,7 +656,7 @@ export function register(program: Command) {
       } else if (provider === "ollama") {
         try {
           const model = config.embedding.model ?? OLLAMA_DEFAULT_MODEL;
-          const emb = new OllamaEmbeddingProvider(config.embedding.baseUrl, config.embedding.model);
+          const emb = new OllamaEmbeddingProvider(config.embedding.baseUrl, model);
           const result = await emb.embed("test");
           console.log(`  Embed:   ollama ${model} (${result.embedding.length}d) ✓`);
         } catch (e) { console.error(`  Embed:   FAIL — ${(e as Error).message}`); ok = false; }

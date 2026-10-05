@@ -204,8 +204,6 @@ export function createDeps(
   const db = new CBrainDB(config.dbPath);
   const isDeterministic = embeddingProvider === "deterministic";
   const isOllama = embeddingProvider === "ollama";
-  // One cloud credential slot, shared by the Zhipu embedding path and as the
-  // NER fallback. Selecting the local provider must not disturb it.
   const apiKey = config.embedding.apiKey ?? process.env.ZHIPU_API_KEY;
   // (#204) deterministic provider is in-process: no credentials, no socket.
   // (#544) the local Ollama provider needs no cloud credential either.

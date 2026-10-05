@@ -77,6 +77,16 @@ function unitVector(seed: number): number[] {
   return v;
 }
 
+/** Unit vector on a single distinct axis. Different inputs get different axes,
+ * so the normalized vector still identifies exactly one input: fixtures that
+ * only differ in magnitude collapse to the same vector after L2 normalization
+ * and therefore cannot detect a reordered or re-sharded response. */
+function axisVector(axis: number): number[] {
+  const v = new Array(DIMS).fill(0);
+  v[axis] = 1;
+  return v;
+}
+
 function norm(v: number[]): number {
   return Math.sqrt(v.reduce((sum, x) => sum + x * x, 0));
 }
@@ -172,23 +182,31 @@ describe("OllamaEmbeddingProvider", () => {
   });
 
   describe("batching", () => {
-    test("shards more than 64 inputs and preserves input order", async () => {
-      const texts = Array.from({ length: 70 }, (_, i) => `chunk-${i}`);
+    test("shards 130 inputs and maps every response back to its own input", async () => {
+      const texts = Array.from({ length: 130 }, (_, i) => `chunk-${i}`);
       mockFetchSequence([
-        { kind: "ok", embeddings: texts.slice(0, 64).map((_, i) => unitVector(i + 1)) },
-        { kind: "ok", embeddings: texts.slice(64).map((_, i) => unitVector(100 + i)) },
+        { kind: "ok", embeddings: texts.slice(0, 64).map((_, i) => axisVector(i)) },
+        { kind: "ok", embeddings: texts.slice(64, 128).map((_, i) => axisVector(64 + i)) },
+        { kind: "ok", embeddings: texts.slice(128).map((_, i) => axisVector(128 + i)) },
       ]);
 
       const results = await fastProvider().embedBatch(texts);
 
-      expect(calls).toHaveLength(2);
-      expect(calls[0].body.input).toHaveLength(64);
-      expect(calls[1].body.input).toHaveLength(6);
-      expect(results).toHaveLength(70);
-      // Order preserved across shards: chunk-0 → 1, chunk-64 → 100.
-      expect(results[0].embedding[0]).toBeCloseTo(1, 6);
-      expect(results[64].embedding[0]).toBeCloseTo(1, 6);
-      expect(results[69].embedding[0]).toBeCloseTo(1, 6);
+      expect(calls).toHaveLength(3);
+      expect(calls.map((c) => c.body.input.length)).toEqual([64, 64, 2]);
+      expect(results).toHaveLength(130);
+      // Item by item: result i is the unit vector on axis i and nothing else.
+      for (let i = 0; i < texts.length; i++) {
+        expect(results[i].embedding[i]).toBeCloseTo(1, 9);
+        expect(norm(results[i].embedding)).toBeCloseTo(1, 9);
+        expect(results[i].embedding.filter((x) => x !== 0)).toHaveLength(1);
+      }
+      // Across both shard boundaries: 63|64 and 127|128.
+      expect(results[63].embedding[63]).toBeCloseTo(1, 9);
+      expect(results[64].embedding[64]).toBeCloseTo(1, 9);
+      expect(results[127].embedding[127]).toBeCloseTo(1, 9);
+      expect(results[128].embedding[128]).toBeCloseTo(1, 9);
+      expect(results[129].embedding[129]).toBeCloseTo(1, 9);
     });
 
     test("distributes tokenCount evenly across inputs", async () => {
@@ -267,6 +285,14 @@ describe("OllamaEmbeddingProvider", () => {
       mockFetchSequence([{ kind: "ok", embeddings: [new Array(DIMS).fill(0)] }]);
       await expect(fastProvider().embed("x")).rejects.toThrow(/is a zero vector/);
     });
+
+    test("rejects an overflowed norm instead of returning 1024 zeros", async () => {
+      // Every entry is finite, but squaring them overflows the sum to
+      // Infinity. Dividing by that norm would emit an all-zero vector — the
+      // very placeholder this provider must never fabricate.
+      mockFetchSequence([{ kind: "ok", embeddings: [new Array(DIMS).fill(1e308)] }]);
+      await expect(fastProvider().embed("x")).rejects.toThrow(/has a non-finite norm/);
+    });
   });
 
   describe("error handling", () => {
@@ -320,6 +346,35 @@ describe("OllamaEmbeddingProvider", () => {
       ]);
       await fastProvider({ maxRetries: 3 }).embed("x");
       expect(fn).toHaveBeenCalledTimes(2);
+    });
+
+    test("never echoes caller text carried by a third-party transport error", async () => {
+      // A transport layer can attach the request body (and therefore the
+      // caller's embedding text) to its own error. The provider must classify
+      // instead of interpolating, in the message and in the stack.
+      const echoed = "匿名页面正文占位符-must-not-leak";
+      mockFetchSequence([
+        { kind: "throw", error: new Error(`socket closed while sending ${echoed}`) },
+      ]);
+
+      try {
+        await fastProvider({ maxRetries: 0 }).embed(echoed);
+        throw new Error("expected the embed call to reject");
+      } catch (error) {
+        const { message, stack } = error as Error;
+        expect(message).not.toContain(echoed);
+        expect(stack ?? "").not.toContain(echoed);
+        expect(message).toMatch(/Ollama embedding network error: request failed/);
+      }
+    });
+
+    test("classifies a TypeError transport failure without its text", async () => {
+      mockFetchSequence([
+        { kind: "throw", error: new TypeError("connect ECONNREFUSED 127.0.0.1:11434") },
+      ]);
+      await expect(fastProvider({ maxRetries: 0 }).embed("x")).rejects.toThrow(
+        /network error: connection failed/,
+      );
     });
 
     test("times out an unresponsive server and reports the budget", async () => {

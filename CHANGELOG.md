@@ -9,7 +9,7 @@
 - `embedding.provider` 新增取值 `ollama`，通过本机 `/api/embed` 使用 `qwen3-embedding:0.6b`，输出 1024 维。选择该 provider 时不上传 embedding 文本到云端，也不需要 `ZHIPU_API_KEY`。
 - `embedding.provider` 改为显式分支：未知取值直接报错，不再静默回退到 Zhipu。
 - 新增编码用途 `query` / `document`（默认 `document`）。`HybridSearch` 与 `InsightManager.queryInsights` 显式使用 `query`；写入、摘要与实体相似度比较保持 `document`。
-- Ollama 请求固定 `truncate:false`；响应按数量、维度、有限数值、非零向量校验，查询与文档向量统一 L2 归一化。失败不回退云端、不返回伪向量、不缩短正文。
+- Ollama 请求固定 `truncate:false`；响应按数量、维度、有限数值、归一化有效性校验（零向量与溢出到非有限 norm 都直接报错），查询与文档向量统一 L2 归一化。失败不回退云端、不返回伪向量、不缩短正文。
 - 批量上限、超时、重试与调用方 `AbortSignal` 沿用既有 Zhipu 路径的预算。
 
 ### Compatibility / Migration

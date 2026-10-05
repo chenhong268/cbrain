@@ -2,11 +2,14 @@ import { setTimeout as delay } from "node:timers/promises";
 import type { EmbeddingProvider, EmbeddingRequestOptions, EmbeddingResult } from "./provider.js";
 
 /**
- * #544: narrow local Ollama provider for Qwen3-Embedding-0.6B.
+ * #544: narrow local Ollama provider for Qwen3-Embedding-0.6B — one model
+ * (`qwen3-embedding:0.6b`, 1024 dims) over Ollama's native `/api/embed`, with
+ * no provider registry and no cloud fallback.
  *
- * Scope: one model (`qwen3-embedding:0.6b`, 1024 dims) over Ollama's native
- * `/api/embed`. No provider registry, no generic model surface. The cloud
- * Zhipu path and the deterministic gate path are untouched.
+ * Privacy rule for this module: an error message carries HTTP status codes,
+ * fixed labels and attempt counts only. Caller text, server error bodies and
+ * third-party error text/stack are never interpolated — all three can echo the
+ * embedding input back.
  */
 const DEFAULT_BASE_URL = "http://127.0.0.1:11434";
 export const OLLAMA_DEFAULT_MODEL = "qwen3-embedding:0.6b";
@@ -26,8 +29,7 @@ export const QUERY_PREFIX =
 // size and memory; `/api/embed` itself has no documented 64-input cap.
 const MAX_BATCH_SIZE = 64;
 
-// Mirrors the Zhipu provider's resilience budget (#270): abort hangs, retry
-// transient faults, fail fast on client errors.
+// Mirrors the Zhipu provider's resilience budget (#270).
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_RETRIES = 3;
 const DEFAULT_BASE_RETRY_DELAY_MS = 200;
@@ -43,15 +45,34 @@ export interface OllamaEmbeddingOptions {
   baseRetryDelayMs?: number;
 }
 
+/** One classified embedding failure; `retryable` gates the retry loop. */
+class EmbedError extends Error {
+  constructor(message: string, readonly retryable: boolean) {
+    super(message);
+  }
+}
+
+/** Actionable, input-free hint for one HTTP status (the body is never read). */
+function statusHint(status: number, model: string): string {
+  if (status === 404) return ` (model "${model}" not found; run \`ollama pull ${model}\`)`;
+  if (status === 400) return " (request rejected; check model context length — truncate is disabled)";
+  return "";
+}
+
+/** Fixed classification for a transport failure (e.g. Ollama not running). */
+function transportError(error: unknown): EmbedError {
+  const label = error instanceof TypeError ? "connection failed" : "request failed";
+  return new EmbedError(`Ollama embedding network error: ${label}`, true);
+}
+
 /**
  * Validate one shard's response and L2-normalize every vector.
  *
- * Qwen3-Embedding returns unnormalized vectors; the LanceDB tables use the
- * default L2 metric, so normalizing here is what makes L2 distance equivalent
- * to cosine. Query and document vectors go through this same path, so the two
- * encodings cannot drift apart. A response that is short, mis-sized,
- * non-finite, or contains a zero vector is a hard error — never silently
- * repaired, never replaced by a placeholder vector.
+ * Every vector is normalized here, in one place, for queries and documents
+ * alike. The LanceDB tables use the L2 metric, so this is what keeps their
+ * ranking equivalent to cosine ranking. A response that is short, mis-sized,
+ * non-finite, or not normalizable (zero or non-finite norm) is a hard error —
+ * never silently repaired, never replaced by a placeholder vector.
  */
 function validateEmbeddings(
   json: OllamaEmbedResponse,
@@ -68,44 +89,32 @@ function validateEmbeddings(
     );
   }
   return raw.map((entry, index) => {
-    if (!Array.isArray(entry)) {
+    // A non-array entry is a dimension mismatch at that index.
+    const size = Array.isArray(entry) ? entry.length : "non-array";
+    if (size !== DIMENSIONS) {
       throw new Error(
-        `Ollama embedding dimension mismatch at index ${index}: got non-array, expected ${DIMENSIONS}`,
-      );
-    }
-    if (entry.length !== DIMENSIONS) {
-      throw new Error(
-        `Ollama embedding dimension mismatch at index ${index}: got ${entry.length}, expected ${DIMENSIONS}`,
+        `Ollama embedding dimension mismatch at index ${index}: got ${size}, expected ${DIMENSIONS}`,
       );
     }
     let sumSquares = 0;
-    for (const value of entry) {
+    for (const value of entry as number[]) {
       if (typeof value !== "number" || !Number.isFinite(value)) {
-        throw new Error(
-          `Ollama embedding at index ${index} contains a non-finite value`,
-        );
+        throw new Error(`Ollama embedding at index ${index} contains a non-finite value`);
       }
       sumSquares += value * value;
     }
+    // Finite inputs can still overflow a sum of squares, and a zero norm cannot
+    // be normalized. Dividing by either emits an all-zero vector, which would
+    // silently break similarity ranking, so both fail loudly instead.
     const norm = Math.sqrt(sumSquares);
+    if (!Number.isFinite(norm)) {
+      throw new Error(`Ollama embedding at index ${index} has a non-finite norm`);
+    }
     if (norm === 0) {
       throw new Error(`Ollama embedding at index ${index} is a zero vector`);
     }
     return (entry as number[]).map((value) => value / norm);
   });
-}
-
-/**
- * Actionable, input-free status hints. The server error body is never
- * interpolated: a body can echo the request text, and this module must not
- * put caller content into an error message.
- */
-function statusHint(status: number, model: string): string {
-  if (status === 404) return `(model "${model}" not found; run \`ollama pull ${model}\`)`;
-  if (status === 400) {
-    return "(request rejected; check model context length — truncate is disabled)";
-  }
-  return "";
 }
 
 export class OllamaEmbeddingProvider implements EmbeddingProvider {
@@ -129,8 +138,7 @@ export class OllamaEmbeddingProvider implements EmbeddingProvider {
   }
 
   async embed(text: string, options?: EmbeddingRequestOptions): Promise<EmbeddingResult> {
-    const results = await this.embedBatch([text], options);
-    return results[0];
+    return (await this.embedBatch([text], options))[0];
   }
 
   async embedBatch(texts: string[], options?: EmbeddingRequestOptions): Promise<EmbeddingResult[]> {
@@ -163,9 +171,10 @@ export class OllamaEmbeddingProvider implements EmbeddingProvider {
   /**
    * POST one ≤64-input shard to /api/embed with timeout + retry.
    *
-   * `truncate:false` is always sent: an over-long input must fail loudly. No
-   * failure path shortens the text, retries the request against a cloud
-   * provider, or fabricates a vector.
+   * `truncate:false` is always sent: an over-long input must fail loudly, and
+   * nothing here shortens the text, retries against a cloud provider, or
+   * fabricates a vector. Every outcome is classified into an `EmbedError`
+   * before the retry decision, so a fail-fast 4xx is never retried.
    */
   private async fetchShardWithRetry(
     shard: string[],
@@ -174,23 +183,15 @@ export class OllamaEmbeddingProvider implements EmbeddingProvider {
     const url = `${this.baseUrl}/api/embed`;
     const body = JSON.stringify({ model: this.model, input: shard, truncate: false });
 
-    type ShardResult =
-      | { ok: true; json: OllamaEmbedResponse }
-      | { ok: false; error: Error; retryable: boolean };
-
-    let lastError: Error = new Error("Ollama embedding request failed");
-    for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
+    for (let attempt = 0; ; attempt++) {
       callerSignal?.throwIfAborted();
       const controller = new AbortController();
       const signal = callerSignal
         ? AbortSignal.any([callerSignal, controller.signal])
         : controller.signal;
       const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+      let failure: EmbedError;
 
-      // try/catch only classifies the fetch outcome into `result`; the
-      // throw/no-throw decision is made below so a fail-fast 4xx cannot be
-      // accidentally caught and retried.
-      let result: ShardResult;
       try {
         const response = await fetch(url, {
           method: "POST",
@@ -198,64 +199,41 @@ export class OllamaEmbeddingProvider implements EmbeddingProvider {
           body,
           signal,
         });
-
-        if (response.ok) {
-          result = { ok: true, json: (await response.json()) as OllamaEmbedResponse };
-        } else {
-          const status = response.status;
-          const retryable = status === 429 || status >= 500;
-          const hint = statusHint(status, this.model);
-          result = {
-            ok: false,
-            retryable,
-            error: new Error(
-              `Ollama embedding API error: ${status}${hint ? ` ${hint}` : ""}`,
-            ),
-          };
-        }
+        if (response.ok) return (await response.json()) as OllamaEmbedResponse;
+        const { status } = response;
+        // 429 and 5xx are transient; every other non-ok status is a client
+        // error that a retry cannot fix.
+        failure = new EmbedError(
+          `Ollama embedding API error: ${status}${statusHint(status, this.model)}`,
+          status === 429 || status >= 500,
+        );
       } catch (error) {
+        // A caller abort wins over classification and is never retried.
         callerSignal?.throwIfAborted();
-        if (error instanceof DOMException && error.name === "AbortError") {
-          result = {
-            ok: false,
-            retryable: true,
-            error: new Error(
-              `Ollama embedding request timed out after ${this.timeoutMs}ms`,
-            ),
-          };
-        } else {
-          // Transport failure (e.g. Ollama not running) — transient, retry it.
-          // A transport error never carries the request body.
-          const reason = error instanceof Error ? error.message : String(error);
-          result = {
-            ok: false,
-            retryable: true,
-            error: new Error(`Ollama embedding network error: ${reason}`),
-          };
-        }
+        failure =
+          error instanceof EmbedError
+            ? error
+            : error instanceof DOMException && error.name === "AbortError"
+              ? new EmbedError(
+                  `Ollama embedding request timed out after ${this.timeoutMs}ms`,
+                  true,
+                )
+              : transportError(error);
       } finally {
         clearTimeout(timer);
       }
 
       callerSignal?.throwIfAborted();
-      if (result.ok) return result.json;
-      lastError = result.error;
-
-      // Non-429 4xx: client error, retrying won't help — fail fast.
-      if (!result.retryable) throw result.error;
-
+      if (!failure.retryable) throw failure;
       // Retryable, but no attempts left — surface the last error with context.
-      if (attempt === this.maxRetries) {
-        throw new Error(`${lastError.message} (after ${attempt + 1} attempts)`);
+      if (attempt >= this.maxRetries) {
+        throw new Error(`${failure.message} (after ${attempt + 1} attempts)`);
       }
-
       // Exponential backoff with up to 25% jitter before the next attempt.
       const backoff = this.baseRetryDelayMs * 2 ** attempt;
-      const jitter = Math.random() * (backoff * 0.25);
-      await delay(backoff + jitter, undefined, { signal: callerSignal });
+      await delay(backoff + Math.random() * backoff * 0.25, undefined, {
+        signal: callerSignal,
+      });
     }
-
-    // Unreachable: every iteration either returns or throws above.
-    throw lastError;
   }
 }
