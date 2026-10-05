@@ -1234,7 +1234,9 @@ export class HybridSearch {
     if (cached && Date.now() < cached.expires) {
       embedding = cached.embedding;
     } else {
-      const result = await this.embedding.embed(query, { signal });
+      // #544: retrieval is a query encoding — Qwen wraps it in the evaluated
+      // query instruction prefix; document vectors stay unwrapped.
+      const result = await this.embedding.embed(query, { signal, purpose: "query" });
       signal?.throwIfAborted();
       embedding = result.embedding;
       this.embeddingCache.set(query, { embedding, expires: Date.now() + HybridSearch.EMBEDDING_CACHE_TTL });

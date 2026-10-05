@@ -70,7 +70,8 @@ export class InsightManager {
 
   async queryInsights(query: string, limit: number = 10): Promise<InsightRow[]> {
     try {
-      const { embedding } = await this.embedding.embed(query);
+      // #544: insight search is a query encoding; insight writes below are not.
+      const { embedding } = await this.embedding.embed(query, { purpose: "query" });
       const vectorResults = await this.lance.searchInsights(embedding, limit * 2);
 
       if (vectorResults.length === 0) return [];
