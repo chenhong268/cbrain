@@ -8,7 +8,7 @@
  * with a mocked model server standing in for a local anonymous Ollama.
  */
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createDeps, type CBrainConfig } from "../../src/cli/context.js";
@@ -101,7 +101,7 @@ describe("#545 R1 — model digest at the initialization boundary", () => {
 
     globalThis.fetch = (async () => {
       throw new Error("ECONNREFUSED");
-    }) as typeof globalThis.fetch;
+    }) as unknown as typeof globalThis.fetch;
     expect(await resolveOllamaModelDigest(UNREACHABLE, MODEL)).toBeUndefined();
   });
 

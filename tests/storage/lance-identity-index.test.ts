@@ -510,11 +510,33 @@ describe("second round: write validation, refused-handle state, identity provena
     await lance.addChunks([{ pageSlug: "entities/local", chunkIndex: 0, content: "chunk one", vector: new Float32Array(vectorFor("chunk one", 1024)) }]);
 
     const result = await rebuildPageVectors({ db, lance, embedding: provider(1024, 128), pageSlug: "entities/local", lancePath });
+    // The page path refuses the width before its destructive step, so the live
+    // rows were never touched (status aborted_unchanged, not rolled back).
     expect(result.status).toBe("aborted_unchanged");
-    expect(result.reason).toMatch(/VECTOR_DIMENSION_MISMATCH/);
+    expect(result.reason).toMatch(/dimension mismatch/);
     const rows = await lance.readRawVectorRows("entities/local");
     expect(rows.length).toBe(1);
     expect(rows[0].content).toBe("chunk one");
+    await lance.close();
+  });
+
+  test("the single-page recovery path refuses a non-finite provider vector and restores the page", async () => {
+    seedPage(db, "entities/local", ["chunk one", "chunk two"]);
+    const lance = new LanceDBManager({ identity: LOCAL });
+    await lance.connect(lancePath);
+    await lance.addChunks([{ pageSlug: "entities/local", chunkIndex: 0, content: "chunk one", vector: new Float32Array(vectorFor("chunk one", 1024)) }]);
+
+    const result = await rebuildPageVectors({
+      db,
+      lance,
+      embedding: brokenProvider((vec) => { vec[2] = Number.NaN; return vec; }),
+      pageSlug: "entities/local",
+      lancePath,
+    });
+    expect(result.status).toBe("failed_rolled_back");
+    expect(result.reason).toMatch(/VECTOR_VALUE_INVALID/);
+    const rows = await lance.readRawVectorRows("entities/local");
+    expect(rows.map((row) => row.content)).toEqual(["chunk one"]);
     await lance.close();
   });
 
