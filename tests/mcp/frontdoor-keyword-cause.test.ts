@@ -58,6 +58,8 @@ for (const [question, body, accepted] of cases) {
         },
       } as never, {
         outputMode: "legacy", db, search,
+        // #550: unverified fake connection, so the Qwen content fallback stays off.
+        lance: { vectorIdentitySnapshot: () => null },
         pages: {
           getBySlug: () => ({ slug, title: "原始记录A", type: "record", body, expires_at: null }),
           // #537: the closed keyword cause path certifies the candidate body from

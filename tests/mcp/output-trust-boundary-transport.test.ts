@@ -41,6 +41,8 @@ function createMockLanceDB() {
     connect: async () => {}, addChunks: async () => {}, search: async () => [],
     fullTextSearch: async () => [], deleteByPageSlug: async () => {}, deleteRawChunksByPageSlug: async () => {},
     close: async () => {}, createFTSIndex: async () => {},
+    // #550: unverified fake connection, so the Qwen content fallback stays off.
+    vectorIdentitySnapshot: () => null,
   };
 }
 function makeDeps(db: CBrainDB, vaultPath: string, runtimePath: string): CBrainDeps {

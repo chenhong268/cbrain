@@ -235,3 +235,114 @@ describe("#545 R1 — model digest at the initialization boundary", () => {
     expect(readIndexIdentity(lancePath)?.modelDigest).toBeUndefined();
   });
 });
+
+/**
+ * #550: the query path may only see the identity of a connection that already
+ * passed the normal verification. These tests go through the manager itself and
+ * never call the snapshot helper directly.
+ */
+describe("#550 — the identity snapshot the query path reads", () => {
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), "cbrain-550-"));
+    originalFetch = globalThis.fetch;
+    installFakeModelServer();
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  test("exposes the identity of a verified connection and hands out a copy", async () => {
+    const lancePath = lanceDir("lance-verified");
+    const seed = new LanceDBManager({ identity: identity({ modelDigest: "digest-current" }) });
+    await seed.connect(lancePath);
+    await seed.addChunks([chunk("entities/a", 0, 1)]);
+    await seed.close();
+
+    const manager = new LanceDBManager({ identity: identity({ modelDigest: "digest-current" }) });
+    await manager.connect(lancePath);
+    try {
+      const snapshot = manager.vectorIdentitySnapshot();
+      expect(snapshot).toEqual({
+        provider: "ollama",
+        model: MODEL,
+        dimensions: DIMS,
+        documentEncoding: 1,
+        modelDigest: "digest-current",
+      });
+
+      // The caller gets a copy: rewriting it cannot change what the manager
+      // verifies against on the next call.
+      const mutable = snapshot as { dimensions: number; model: string; modelDigest?: string };
+      mutable.dimensions = 2048;
+      mutable.model = "qwen3-embedding:4b";
+      mutable.modelDigest = "d".repeat(64);
+      const second = manager.vectorIdentitySnapshot();
+      expect(second).not.toBe(snapshot);
+      expect(second).toEqual({
+        provider: "ollama",
+        model: MODEL,
+        dimensions: DIMS,
+        documentEncoding: 1,
+        modelDigest: "digest-current",
+      });
+    } finally {
+      await manager.close();
+    }
+  });
+
+  test("reports nothing before a connection and after the handle is closed", async () => {
+    const lancePath = lanceDir("lance-lifecycle");
+    const seed = new LanceDBManager({ identity: identity({ modelDigest: "digest-current" }) });
+    await seed.connect(lancePath);
+    await seed.addChunks([chunk("entities/a", 0, 1)]);
+    await seed.close();
+
+    const manager = new LanceDBManager({ identity: identity({ modelDigest: "digest-current" }) });
+    expect(manager.vectorIdentitySnapshot()).toBeNull();
+
+    await manager.connect(lancePath);
+    expect(manager.vectorIdentitySnapshot()).not.toBeNull();
+
+    await manager.close();
+    expect(manager.vectorIdentitySnapshot()).toBeNull();
+  });
+
+  test("reports nothing when the connection was refused", async () => {
+    const lancePath = lanceDir("lance-refused");
+    const first = new LanceDBManager({ identity: identity({ modelDigest: "digest-old" }) });
+    await first.connect(lancePath);
+    await first.addChunks([chunk("entities/a", 0, 1)]);
+    await first.close();
+
+    const refused = new LanceDBManager({ identity: identity({ modelDigest: "digest-current" }) });
+    await expect(refused.connect(lancePath)).rejects.toThrow(/LANCE_IDENTITY_MISMATCH/);
+    expect(refused.vectorIdentitySnapshot()).toBeNull();
+    await refused.close();
+  });
+
+  test("reports nothing for an index that carries no resolved identity", async () => {
+    const empty = new LanceDBManager({});
+    await empty.connect(lanceDir("lance-empty"));
+    expect(empty.vectorIdentitySnapshot()).toBeNull();
+    await empty.close();
+
+    const deterministic = createDeps({
+      vaultPath: join(root, "vault"),
+      dbPath: join(root, "snapshot.sqlite"),
+      lancePath: lanceDir("lance-deterministic-snapshot"),
+      runtimePath: join(root, "runtime"),
+      embedding: { provider: "deterministic" },
+    }, true);
+    try {
+      await deterministic.lance.connect(join(root, "lance-deterministic-snapshot"));
+      await deterministic.lance.addChunks([{ pageSlug: "entities/a", chunkIndex: 0, content: "alpha", vector: vector(1, 2048) }]);
+      // A recorded provider without a model digest is not a verified identity.
+      expect(deterministic.lance.vectorIdentitySnapshot()).toBeNull();
+    } finally {
+      await deterministic.lance.close();
+      deterministic.db.close();
+    }
+  });
+});
