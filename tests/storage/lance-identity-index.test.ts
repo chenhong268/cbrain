@@ -540,6 +540,27 @@ describe("second round: write validation, refused-handle state, identity provena
     await lance.close();
   });
 
+  test("a width mismatch refuses connect and leaves no usable handle either", async () => {
+    const writer = new LanceDBManager({ identity: LOCAL });
+    await writer.connect(lancePath);
+    await writer.addChunks([{ pageSlug: "entities/a", chunkIndex: 0, content: "alpha", vector: new Float32Array(vectorFor("alpha", 1024)) }]);
+    await writer.close();
+
+    // The tables are sound, but the identity on disk claims another width.
+    const lance = new LanceDBManager({ identity: CLOUD });
+    await expect(lance.connect(lancePath)).rejects.toThrow(/LANCE_IDENTITY_MISMATCH/);
+    await expect(lance.search(new Float32Array(vectorFor("alpha", 2048)), 5)).rejects.toThrow(/not connected/);
+    await expect(lance.addChunks([{ pageSlug: "entities/b", chunkIndex: 0, content: "beta", vector: new Float32Array(vectorFor("beta", 2048)) }]))
+      .rejects.toThrow(/not connected/);
+
+    // The index and its identity are untouched by the refused open.
+    expect(readIndexIdentity(lancePath)).toEqual(LOCAL);
+    const reader = new LanceDBManager({ identity: LOCAL });
+    await reader.connect(lancePath);
+    expect((await reader.search(new Float32Array(vectorFor("alpha", 1024)), 5)).length).toBe(1);
+    await reader.close();
+  });
+
   test("a legacy unlabelled index stays unlabelled through warmup, reads, sibling tables and new rows", async () => {
     // 2048d chunks-only index, no identity file: the pre-#545 shape.
     const legacy = new LanceDBManager({});
