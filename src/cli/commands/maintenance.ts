@@ -99,26 +99,30 @@ export async function handleReindexVectors(
   return exitCode;
 }
 
+/** #545 R1: identity for a full rebuild, plus whether the online digest was readable. */
+interface RebuildIdentityResolution {
+  identity?: VectorIndexIdentity;
+  /** True when the model server could not confirm the digest of an online model. */
+  digestUnavailable: boolean;
+}
+
 /**
  * #545: identity recorded when a full vector rebuild replaces the index.
  *
- * This is the only place that resolves the local model digest — it runs at a
- * rebuild boundary, never on a normal read, so a search does not touch the
- * model management API. An unreachable model server yields an identity without
- * a digest: recorded as "not resolved", never guessed.
+ * The digest is resolved at a rebuild boundary, never on a normal read, so a
+ * search does not touch the model management API. When the model server cannot
+ * confirm the digest, the rebuild is refused instead of recording an identity
+ * it could not verify (#545 R1).
  */
 async function resolveRebuildIdentity(
   config: CBrainConfig,
   embedding: EmbeddingProvider | undefined,
-): Promise<VectorIndexIdentity | undefined> {
+): Promise<RebuildIdentityResolution> {
   const identity = resolveVectorIdentity(config, embedding);
-  if (!identity || identity.provider !== "ollama") return identity;
+  if (!identity || identity.provider !== "ollama") return { identity, digestUnavailable: false };
   const digest = await resolveOllamaModelDigest(config.embedding.baseUrl, identity.model);
-  if (!digest) {
-    console.log("Note: model digest unavailable (model server unreachable) — index identity recorded without a digest.");
-    return identity;
-  }
-  return { ...identity, modelDigest: digest };
+  if (!digest) return { identity, digestUnavailable: true };
+  return { identity: { ...identity, modelDigest: digest }, digestUnavailable: false };
 }
 
 /**
@@ -441,9 +445,19 @@ export function register(program: Command) {
       // a running serve, so refuse while a writer is active.
       if (mode.mode === "reindex-vectors") {
         console.log("Reindexing vectors (atomic staging rebuild)...");
-        const identity = await resolveRebuildIdentity(config, deps.embedding);
+        const resolved = await resolveRebuildIdentity(config, deps.embedding);
+        if (resolved.digestUnavailable) {
+          // #545 R1: fail closed. A rebuild that cannot record the digest of its
+          // model would silently accept a later same-name model change.
+          console.error(
+            "Error: the model server reported no digest, so the rebuilt index identity cannot be confirmed. "
+            + "Refusing to rebuild. Recovery: start the model server (or fix embedding.baseUrl) and retry.",
+          );
+          process.exitCode = 1;
+          return;
+        }
         process.exitCode = await handleReindexVectors(
-          config.lancePath, deps.db, deps.embedding, lockProbe, identity,
+          config.lancePath, deps.db, deps.embedding, lockProbe, resolved.identity,
         );
         return;
       }

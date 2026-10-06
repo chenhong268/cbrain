@@ -224,3 +224,38 @@ export function vectorColumnDimensions(schema: { fields?: Array<{ name: string; 
   const type = field?.type as { listSize?: unknown } | undefined;
   return typeof type?.listSize === "number" ? type.listSize : null;
 }
+
+/**
+ * #545 R2: reject a vector the index cannot store faithfully.
+ *
+ * Width alone is not enough. The store accepts a short vector and reads it back
+ * padded, and NaN / Infinity / a value that overflows Float32 are stored
+ * without an error — recall then degrades silently instead of failing. Callers
+ * validate a whole batch BEFORE the first row is written, so one bad vector
+ * writes nothing, and they never pad or truncate a vector to make it fit.
+ */
+export function assertStorableVector(vector: ArrayLike<number>, dimensions: number, label: string): void {
+  if (vector.length !== dimensions) {
+    throw new VectorIdentityError(
+      `VECTOR_DIMENSION_MISMATCH: ${label} carries ${vector.length}d, the index stores ${dimensions}d. `
+      + "Refusing to write a vector that cannot be read back unchanged. Align the embedding provider with the "
+      + "index width, or rebuild the index with the configured model. Do not pad or truncate the vector.",
+    );
+  }
+  for (let i = 0; i < vector.length; i++) {
+    const value = vector[i];
+    if (!Number.isFinite(value)) {
+      throw new VectorIdentityError(
+        `VECTOR_VALUE_INVALID: ${label}[${i}] is ${value}. A non-finite value carries no direction. `
+        + "The embedding provider produced a broken vector; fix the provider or rebuild the index.",
+      );
+    }
+    const f32 = Math.fround(value);
+    if (!Number.isFinite(f32)) {
+      throw new VectorIdentityError(
+        `VECTOR_VALUE_INVALID: ${label}[${i}] = ${value} overflows Float32 and would be stored as ${f32}. `
+        + "The embedding provider produced a broken vector; fix the provider or rebuild the index.",
+      );
+    }
+  }
+}

@@ -4,7 +4,7 @@ import { dirname, join, resolve } from "node:path";
 import { CBrainDB } from "../storage/sqlite.js";
 import { LanceDBManager } from "../storage/lancedb.js";
 import { ZhipuEmbeddingProvider, ZHIPU_EMBEDDING_MODEL } from "../embedding/zhipu.js";
-import { OllamaEmbeddingProvider, OLLAMA_DEFAULT_MODEL } from "../embedding/ollama.js";
+import { OllamaEmbeddingProvider, OLLAMA_DEFAULT_MODEL, resolveOllamaModelDigest } from "../embedding/ollama.js";
 import { DeterministicEmbeddingProvider, DETERMINISTIC_EMBEDDING_MODEL } from "../embedding/deterministic.js";
 import type { EmbeddingProvider } from "../embedding/provider.js";
 import { vectorIndexIdentity } from "../storage/lance-identity.js";
@@ -250,9 +250,17 @@ export function createDeps(
   // #545: the vector index records the model that built it, and the manager
   // verifies that identity before any read or write. A config change therefore
   // cannot silently mix two vector spaces that share a width.
+  const vectorIdentity = resolveVectorIdentity(config, embedding);
   const lance = new LanceDBManager({
     ...config.maintenance,
-    identity: resolveVectorIdentity(config, embedding),
+    identity: vectorIdentity,
+    // #545 R1: resolve the local model digest at this initialization boundary —
+    // once per connect(), never per query. When the model server cannot report a
+    // digest, the manager refuses vector writes instead of recording an identity
+    // it could not confirm.
+    ...(isOllama && vectorIdentity
+      ? { resolveModelDigest: () => resolveOllamaModelDigest(config.embedding.baseUrl, vectorIdentity.model) }
+      : {}),
   });
 
   // #544: NER/reflect credentials stay a separate contract. Removing the

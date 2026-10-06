@@ -282,7 +282,7 @@ describe("full rebuild commits the identity with the verified directory", () => 
 
   test("refuses a provider that returns the wrong width, and touches nothing", async () => {
     await expect(rebuildLanceIndex(lancePath, db, provider(1024, 2048), undefined, { identity: LOCAL }))
-      .rejects.toThrow(/EMBEDDING_DIMENSION_MISMATCH/);
+      .rejects.toThrow(/VECTOR_DIMENSION_MISMATCH/);
     expect(existsSync(lancePath)).toBe(false);
     expect(readdirSync(TEST_DIR).filter((entry) => entry.includes(".rebuild-"))).toEqual([]);
   });
@@ -364,5 +364,186 @@ describe("resolveVectorIdentity: config to identity wiring", () => {
 
   test("returns no identity when there is no provider instance", () => {
     expect(resolveVectorIdentity({ ...base, embedding: { provider: "zhipu" } }, undefined)).toBeUndefined();
+  });
+});
+
+describe("second round: write validation, refused-handle state, identity provenance", () => {
+  const dbPath = join(TEST_DIR, "test.sqlite");
+  const lancePath = join(TEST_DIR, "lance");
+  let db: CBrainDB;
+
+  beforeEach(() => {
+    if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
+    mkdirSync(TEST_DIR, { recursive: true });
+    db = new CBrainDB(dbPath);
+  });
+
+  afterEach(() => {
+    db.close();
+    if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
+  });
+
+  async function tableNames(): Promise<string[]> {
+    const conn = await lancedb.connect(lancePath);
+    const names = await conn.tableNames();
+    conn.close();
+    return names;
+  }
+
+  /** A provider that returns whatever `break_` leaves behind — NaN, Infinity, overflow. */
+  function brokenProvider(break_: (vec: number[]) => number[]) {
+    const make = (text: string) => ({ embedding: break_(vectorFor(text, 1024)), tokenCount: text.length });
+    return {
+      dimensions: 1024,
+      embed: async (text: string) => make(text),
+      embedBatch: async (texts: string[]) => texts.map(make),
+    } as unknown as EmbeddingProvider;
+  }
+
+  test("refuses a wrong-width chunk vector and writes nothing", async () => {
+    const lance = new LanceDBManager({ identity: LOCAL });
+    await lance.connect(lancePath);
+
+    await expect(lance.addChunks([
+      { pageSlug: "entities/a", chunkIndex: 0, content: "alpha", vector: new Float32Array(vectorFor("alpha", 1024)) },
+      { pageSlug: "entities/b", chunkIndex: 0, content: "beta", vector: new Float32Array(vectorFor("beta", 128)) },
+    ])).rejects.toThrow(/VECTOR_DIMENSION_MISMATCH/);
+
+    // The whole batch is validated first: the good row was not written either.
+    expect(await tableNames()).toEqual([]);
+    expect(readIndexIdentity(lancePath)).toBeNull();
+    await lance.close();
+  });
+
+  test("refuses a wrong-width insight vector", async () => {
+    const lance = new LanceDBManager({ identity: LOCAL });
+    await lance.connect(lancePath);
+    await lance.addChunks([{ pageSlug: "entities/a", chunkIndex: 0, content: "alpha", vector: new Float32Array(vectorFor("alpha", 1024)) }]);
+
+    await expect(lance.addInsightVector({ id: 1, content: "insight", vector: new Float32Array(vectorFor("insight", 128)) }))
+      .rejects.toThrow(/VECTOR_DIMENSION_MISMATCH/);
+    expect(await tableNames()).not.toContain("insights");
+    await lance.close();
+  });
+
+  test("refuses NaN and Infinity at the write boundary and writes nothing", async () => {
+    const lance = new LanceDBManager({ identity: LOCAL });
+    await lance.connect(lancePath);
+
+    const nan = new Float32Array(vectorFor("alpha", 1024));
+    nan[5] = Number.NaN;
+    await expect(lance.addChunks([{ pageSlug: "entities/a", chunkIndex: 0, content: "alpha", vector: nan }]))
+      .rejects.toThrow(/VECTOR_VALUE_INVALID/);
+
+    const infinite = new Float32Array(vectorFor("alpha", 1024));
+    infinite[7] = Number.POSITIVE_INFINITY;
+    await expect(lance.addChunks([{ pageSlug: "entities/a", chunkIndex: 0, content: "alpha", vector: infinite }]))
+      .rejects.toThrow(/VECTOR_VALUE_INVALID/);
+
+    const badInsight = new Float32Array(vectorFor("insight", 1024));
+    badInsight[9] = Number.NaN;
+    await expect(lance.addInsightVector({ id: 1, content: "insight", vector: badInsight }))
+      .rejects.toThrow(/VECTOR_VALUE_INVALID/);
+
+    expect(await tableNames()).toEqual([]);
+    await lance.close();
+  });
+
+  test("a full rebuild refuses a broken provider vector and leaves the live index and identity alone", async () => {
+    const live = new LanceDBManager({ identity: { ...LOCAL, modelDigest: "sha256:live" } });
+    await live.connect(lancePath);
+    await live.addChunks([{ pageSlug: "entities/rb", chunkIndex: 0, content: "old vector", vector: new Float32Array(vectorFor("old vector", 1024)) }]);
+    await live.close();
+    const identityBefore = readFileSync(identityFilePath(lancePath), "utf8");
+    seedPage(db, "entities/rb", ["chunk one"]);
+
+    await expect(rebuildLanceIndex(lancePath, db, brokenProvider((vec) => { vec[3] = Number.NaN; return vec; }), undefined, {
+      identity: { ...LOCAL, modelDigest: "sha256:rebuilt" },
+    })).rejects.toThrow(/VECTOR_VALUE_INVALID/);
+
+    // A value that a provider may return as a JS number but the store cannot hold.
+    await expect(rebuildLanceIndex(lancePath, db, brokenProvider((vec) => { vec[4] = 1e39; return vec; }), undefined, {
+      identity: { ...LOCAL, modelDigest: "sha256:rebuilt" },
+    })).rejects.toThrow(/VECTOR_VALUE_INVALID/);
+
+    expect(readFileSync(identityFilePath(lancePath), "utf8")).toBe(identityBefore);
+    expect(readdirSync(TEST_DIR).filter((entry) => entry.includes(".rebuild-"))).toEqual([]);
+    const reader = new LanceDBManager({ identity: { ...LOCAL, modelDigest: "sha256:live" } });
+    await reader.connect(lancePath);
+    const rows = await reader.readRawVectorRows("entities/rb");
+    expect(rows.length).toBe(1);
+    expect(rows[0].content).toBe("old vector");
+    await reader.close();
+  });
+
+  test("a refused connect leaves no usable handle, and a repaired index reconnects on the same instance", async () => {
+    const writer = new LanceDBManager({ identity: LOCAL });
+    await writer.connect(lancePath);
+    await writer.addChunks([{ pageSlug: "entities/a", chunkIndex: 0, content: "alpha", vector: new Float32Array(vectorFor("alpha", 1024)) }]);
+    await writer.close();
+
+    writeFileSync(identityFilePath(lancePath), "{ not json", "utf8");
+    const lance = new LanceDBManager({ identity: LOCAL });
+    await expect(lance.connect(lancePath)).rejects.toThrow(/LANCE_IDENTITY_CORRUPT/);
+
+    // The refused instance must not read or extend the tables it just refused,
+    // and it must not have repaired the damaged file on its own.
+    const query = new Float32Array(vectorFor("alpha", 1024));
+    await expect(lance.search(query, 5)).rejects.toThrow(/not connected/);
+    await expect(lance.addChunks([{ pageSlug: "entities/b", chunkIndex: 0, content: "beta", vector: query }])).rejects.toThrow(/not connected/);
+    await expect(lance.warmup()).rejects.toThrow(/not connected/);
+    await expect(lance.openChunksStrict()).rejects.toThrow(/not connected/);
+    expect(readFileSync(identityFilePath(lancePath), "utf8")).toBe("{ not json");
+
+    // Once the index itself is sound again, the same instance works normally.
+    writeIndexIdentity(lancePath, LOCAL);
+    await lance.connect(lancePath);
+    expect(await lance.getIndexedPageSlugs()).toEqual(["entities/a"]);
+    expect((await lance.search(query, 5)).length).toBe(1);
+    await lance.close();
+  });
+
+  test("the single-page recovery path refuses a wrong-width provider vector without losing the page", async () => {
+    seedPage(db, "entities/local", ["chunk one", "chunk two"]);
+    const lance = new LanceDBManager({ identity: LOCAL });
+    await lance.connect(lancePath);
+    await lance.addChunks([{ pageSlug: "entities/local", chunkIndex: 0, content: "chunk one", vector: new Float32Array(vectorFor("chunk one", 1024)) }]);
+
+    const result = await rebuildPageVectors({ db, lance, embedding: provider(1024, 128), pageSlug: "entities/local", lancePath });
+    expect(result.status).toBe("aborted_unchanged");
+    expect(result.reason).toMatch(/VECTOR_DIMENSION_MISMATCH/);
+    const rows = await lance.readRawVectorRows("entities/local");
+    expect(rows.length).toBe(1);
+    expect(rows[0].content).toBe("chunk one");
+    await lance.close();
+  });
+
+  test("a legacy unlabelled index stays unlabelled through warmup, reads, sibling tables and new rows", async () => {
+    // 2048d chunks-only index, no identity file: the pre-#545 shape.
+    const legacy = new LanceDBManager({});
+    await legacy.connect(lancePath);
+    await legacy.addChunks([{ pageSlug: "entities/legacy", chunkIndex: 0, content: "legacy", vector: new Float32Array(vectorFor("legacy", 2048)) }]);
+    await legacy.close();
+    expect(readIndexIdentity(lancePath)).toBeNull();
+    expect(await tableNames()).toEqual(["chunks"]);
+
+    const lance = new LanceDBManager({ identity: CLOUD });
+    await lance.connect(lancePath);
+    const warm = await lance.warmup();
+    expect(warm.tables).toContain("insights");
+    await lance.addChunks([{ pageSlug: "entities/new", chunkIndex: 0, content: "new", vector: new Float32Array(vectorFor("new", 2048)) }]);
+    expect((await lance.search(new Float32Array(vectorFor("legacy", 2048)), 5)).length).toBeGreaterThan(0);
+    expect((await lance.readRawVectorRows("entities/legacy"))[0].vector?.length).toBe(2048);
+    await lance.close();
+
+    // Whatever the current configuration says, the old vectors keep no origin.
+    expect(readIndexIdentity(lancePath)).toBeNull();
+    expect(existsSync(identityFilePath(lancePath))).toBe(false);
+
+    // Only an explicit full rebuild may confirm the identity of that data.
+    seedPage(db, "entities/rb", ["chunk one"]);
+    const result = await rebuildLanceIndex(lancePath, db, provider(2048), undefined, { identity: CLOUD });
+    expect(result.noOp).toBe(false);
+    expect(readIndexIdentity(lancePath)).toEqual(CLOUD);
   });
 });

@@ -4,6 +4,7 @@ import { readdir, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import {
   assertIndexIdentity,
+  assertStorableVector,
   readIndexIdentity,
   vectorColumnDimensions,
   vectorSchemas,
@@ -75,6 +76,14 @@ export interface LanceManagerOptions {
    * disables the model comparison but never the schema consistency check.
    */
   identity?: VectorIndexIdentity;
+  /**
+   * #545 R1: async resolver for the local model digest. Called once per
+   * connect() — the initialization boundary — and never per query. Only the
+   * online provider that can report a digest sets it. When it yields no digest,
+   * reads keep working (offline diagnostics) but vector writes are refused: an
+   * index whose model cannot be confirmed must not grow.
+   */
+  resolveModelDigest?: () => Promise<string | undefined>;
 }
 
 /**
@@ -98,7 +107,7 @@ export interface RawVectorRow {
 }
 
 /** Normalize whatever Arrow hands back for a FixedSizeList vector into Float32Array. */
-function normalizeVector(v: unknown): Float32Array {
+export function normalizeVector(v: unknown): Float32Array {
   if (v instanceof Float32Array) return v;
   if (v instanceof Float64Array) return Float32Array.from(v);
   if (Array.isArray(v)) return Float32Array.from(v as number[]);
@@ -120,11 +129,15 @@ export class LanceDBManager {
   private readonly compactRetentionMs: number;
   private tables: Map<string, lancedb.Table> = new Map();
   /** Expected model identity; null means "no provider context, schema check only". */
-  private readonly expectedIdentity: VectorIndexIdentity | null;
+  private expectedIdentity: VectorIndexIdentity | null;
   private storedIdentity: VectorIndexIdentity | null = null;
   private dimensions: number;
   private schemas: VectorSchemaSet;
   private identityCommitted = false;
+  private readonly resolveModelDigest?: () => Promise<string | undefined>;
+  private digestUnavailable = false;
+  /** True only when the index held no vector table at connect time (#545 R4). */
+  private freshIndex = false;
 
   constructor(options: LanceManagerOptions = {}) {
     const hours = options.compactRetentionHours ?? LanceDBManager.COMPACT_RETENTION_MS / 3600_000;
@@ -133,6 +146,7 @@ export class LanceDBManager {
     }
     this.compactRetentionMs = hours * 3600_000;
     this.expectedIdentity = options.identity ?? null;
+    this.resolveModelDigest = options.resolveModelDigest;
     this.dimensions = this.expectedIdentity?.dimensions ?? VECTOR_DIMENSIONS;
     this.schemas = vectorSchemas(this.dimensions);
   }
@@ -147,7 +161,63 @@ export class LanceDBManager {
     this.dbPath = resolve(path);
     this.tables.clear();
     this.tableInits.clear();
-    await this.verifyIndexOnConnect();
+    this.identityCommitted = false;
+    this.digestUnavailable = false;
+    this.freshIndex = false;
+    try {
+      await this.resolveExpectedDigest();
+      await this.verifyIndexOnConnect();
+    } catch (e) {
+      // #545 R3: a refused index must not leave a usable handle behind. Cached
+      // tables are the dangerous part — without this the same instance could
+      // still read and write the vectors it just refused to trust.
+      this.resetConnectionState();
+      throw e;
+    }
+  }
+
+  /** #545 R3: drop every handle and identity state acquired by a failed connect. */
+  private resetConnectionState(): void {
+    this.tables.clear();
+    this.tableInits.clear();
+    this.db = null;
+    this.dbPath = null;
+    this.storedIdentity = null;
+    this.identityCommitted = false;
+    this.freshIndex = false;
+  }
+
+  /**
+   * #545 R1: resolve the local model digest once, before any read or write, so a
+   * same-name model update is caught at the normal entry point instead of only
+   * at an explicit rebuild. A missing digest does not fail the open — offline
+   * diagnostics must keep working — but it does close the write gate below.
+   */
+  private async resolveExpectedDigest(): Promise<void> {
+    if (!this.resolveModelDigest || !this.expectedIdentity || this.expectedIdentity.modelDigest) return;
+    const digest = await this.resolveModelDigest();
+    if (!digest) {
+      this.digestUnavailable = true;
+      return;
+    }
+    this.expectedIdentity = { ...this.expectedIdentity, modelDigest: digest };
+  }
+
+  /**
+   * #545 R1/R2: gate every persistent vector write. Reads still work with an
+   * unconfirmed identity, but an index whose model could not be confirmed must
+   * not grow: failing closed here beats recording vectors under a guessed
+   * identity.
+   */
+  private assertWritable(): void {
+    if (!this.db) throw new Error("LanceDB not connected. Call connect() first.");
+    if (!this.digestUnavailable || !this.expectedIdentity) return;
+    throw new VectorIdentityError(
+      "LANCE_IDENTITY_DIGEST_UNAVAILABLE: the model server reported no digest for "
+      + `provider=${this.expectedIdentity.provider} model=${this.expectedIdentity.model}, so this index identity `
+      + "cannot be confirmed. Refusing to write vectors. Recovery: start the model server (or fix "
+      + "embedding.baseUrl) and retry; if the model changed, rebuild with cbrain sync --reindex-vectors.",
+    );
   }
 
   /**
@@ -158,6 +228,10 @@ export class LanceDBManager {
     if (!this.db || !this.dbPath) return;
     const tableNames = await this.db.tableNames();
     this.storedIdentity = readIndexIdentity(this.dbPath);
+    // #545 R4: only a directory that held no vector table is a truly new index.
+    // A missing sibling table in an existing index is NOT a new index, so the
+    // current configuration must not be written as the origin of old vectors.
+    this.freshIndex = !tableNames.some((name) => name === "chunks" || name === "insights");
 
     if (tableNames.length === 0) {
       if (this.storedIdentity) {
@@ -240,12 +314,14 @@ export class LanceDBManager {
   }
 
   /**
-   * A newly created index records the model that built it. Only called on the
-   * creation path of a directory that held no tables, and only when this handle
-   * knows which provider is configured.
+   * A newly created index records the model that built it. Called only on the
+   * creation path, and only for a directory that held no vector table when this
+   * handle connected: creating a missing sibling table, warming up, reading or
+   * writing into an existing index must never label old vectors with the current
+   * configuration (#545 R4).
    */
   private commitIdentityOnCreate(): void {
-    if (this.identityCommitted || !this.expectedIdentity || this.storedIdentity || !this.dbPath) return;
+    if (!this.freshIndex || this.identityCommitted || !this.expectedIdentity || this.storedIdentity || !this.dbPath) return;
     writeIndexIdentity(this.dbPath, this.expectedIdentity);
     this.storedIdentity = this.expectedIdentity;
     this.identityCommitted = true;
@@ -280,6 +356,13 @@ export class LanceDBManager {
 
   async addChunks(chunks: ChunkData[]): Promise<void> {
     if (chunks.length === 0) return;
+    // #545 R2: validate the whole batch before the first row is written, so a
+    // batch that holds one bad vector writes nothing at all.
+    this.assertWritable();
+    chunks.forEach((chunk, index) => {
+      if (!chunk.vector) return;
+      assertStorableVector(chunk.vector, this.dimensions, `chunk ${index} (${chunk.pageSlug}:${chunk.chunkIndex})`);
+    });
     const table = await this.getOrCreateTable("chunks");
 
     const records: Data = chunks.map((chunk) => ({
@@ -446,6 +529,8 @@ export class LanceDBManager {
   // ─── Insights table ────────────────────────────────────────────
 
   async addInsightVector(data: InsightVectorData): Promise<void> {
+    this.assertWritable();
+    if (data.vector) assertStorableVector(data.vector, this.dimensions, `insight ${data.id}`);
     const table = await this.getOrCreateTable("insights");
     await table.add([{
       id: data.id,

@@ -21,8 +21,9 @@ import * as lancedb from "@lancedb/lancedb";
 import type { CBrainDB } from "./sqlite.js";
 import type { EmbeddingProvider } from "../embedding/provider.js";
 import type { EmbeddingResult } from "../embedding/provider.js";
-import { vectorIndexIdentity, vectorSchemas, writeIndexIdentity, DOCUMENT_ENCODING_VERSION } from "./lance-identity.js";
+import { assertStorableVector, vectorIndexIdentity, vectorSchemas, writeIndexIdentity, DOCUMENT_ENCODING_VERSION } from "./lance-identity.js";
 import type { VectorIndexIdentity } from "./lance-identity.js";
+import { normalizeVector } from "./lancedb.js";
 
 // ── Types ───────────────────────────────────────────────────
 
@@ -110,14 +111,11 @@ async function embedInBatches<T>(input: {
     if (embedded.length !== rows.length) {
       throw new Error(`EMBEDDING_COUNT_MISMATCH: ${input.phase} batch returned ${embedded.length}, expected ${rows.length}`);
     }
-    // #545: the staging schema is built from the provider's declared width, so a
-    // provider that returns another width must fail here, not write a bad row.
-    for (const result of embedded) {
-      if (result.embedding.length !== input.dimensions) {
-        throw new Error(
-          `EMBEDDING_DIMENSION_MISMATCH: ${input.phase} provider returned ${result.embedding.length}d, expected ${input.dimensions}d`,
-        );
-      }
+    // #545 R2: the staging schema is built from the provider's declared width, so
+    // a provider that returns another width — or a NaN / Infinity / Float32
+    // overflow value — must fail here, before any row reaches the table.
+    for (const [index, result] of embedded.entries()) {
+      assertStorableVector(result.embedding, input.dimensions, `${input.phase} provider row ${offset + index}`);
     }
     out.push(...embedded);
     const batch = Math.floor(offset / input.batchSize) + 1;
@@ -130,6 +128,38 @@ async function embedInBatches<T>(input: {
     });
   }
   return out;
+}
+
+/**
+ * #545 R2: check the vectors the staging index actually stores — not only the
+ * ones the provider returned. Reading them back catches a store that silently
+ * pads, truncates, or coerces a row. Paged, so a large index does not need a
+ * second full copy of every vector in memory.
+ */
+async function verifyStoredVectors(input: {
+  conn: lancedb.Connection;
+  tableName: "chunks" | "insights";
+  dimensions: number;
+  expectedRows: number;
+}): Promise<void> {
+  const pageSize = 1024;
+  const table = await input.conn.openTable(input.tableName);
+  let verified = 0;
+  for (let offset = 0; offset < input.expectedRows; offset += pageSize) {
+    const rows = await table.query().select(["vector"]).limit(pageSize).offset(offset).toArray();
+    if (rows.length === 0) break;
+    rows.forEach((row, index) => {
+      assertStorableVector(
+        normalizeVector((row as Record<string, unknown>).vector),
+        input.dimensions,
+        `stored ${input.tableName} row ${offset + index}`,
+      );
+    });
+    verified += rows.length;
+  }
+  if (verified !== input.expectedRows) {
+    throw new Error(`VERIFY_FAIL: ${input.tableName} stored ${verified} vectors, expected ${input.expectedRows}`);
+  }
 }
 
 // ── Main rebuilder ──────────────────────────────────────────
@@ -300,6 +330,15 @@ export async function rebuildLanceIndex(
           throw new Error(`VERIFY_FAIL: missing insight id ${id} in staging`);
         }
       }
+    }
+
+    // #545 R2: validate the vectors staging actually stores, not only the ones
+    // the provider returned, before anything can be committed.
+    if (chunkRows.length > 0) {
+      await verifyStoredVectors({ conn: stagingConn, tableName: "chunks", dimensions, expectedRows: chunkRows.length });
+    }
+    if (insightRows.length > 0) {
+      await verifyStoredVectors({ conn: stagingConn, tableName: "insights", dimensions, expectedRows: insightRows.length });
     }
 
     // #545: commit the model identity only after staging verified. It travels
