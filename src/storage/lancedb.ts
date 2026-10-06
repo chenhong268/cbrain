@@ -162,19 +162,21 @@ export class LanceDBManager {
   }
 
   async connect(path: string): Promise<void> {
+    // #550 F2: revoke the snapshot before the first await — a reconnect never publishes the old identity.
+    this.connectionVerified = false;
     this.db = await lancedb.connect(path);
     this.dbPath = resolve(path);
     this.tables.clear();
     this.tableInits.clear();
     this.identityCommitted = false;
     this.freshIndex = false;
-    this.connectionVerified = false;
     try {
       // #545 F3/F2: resolve the digest for THIS connection — a kept value hides a swap on reopen.
       this.activeIdentity = await this.resolveActiveIdentity();
       await this.verifyIndexOnConnect();
-      // #550 — only a connection that passed identity and schema verification may publish a snapshot.
-      this.connectionVerified = true;
+      // #550 F1: only a live digest from the configured resolver confirms the current model.
+      this.connectionVerified =
+        this.activeIdentity?.modelDigest !== undefined && this.resolveModelDigest !== undefined;
     } catch (e) {
       // #545 R3: a refused index must not leave a usable handle behind — cached tables keep working.
       this.resetConnectionState();
