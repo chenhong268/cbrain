@@ -239,13 +239,8 @@ export class OllamaEmbeddingProvider implements EmbeddingProvider {
 }
 
 /**
- * #545: resolve the local model digest from the Ollama model list.
- *
- * Called only at an index creation / rebuild boundary — never per query, so a
- * normal search does not talk to the model management API. Returns `undefined`
- * when the server is unreachable or reports no digest for the model: offline
- * checks must not fail because the model server is down, and the identity is
- * always written as "digest not resolved" rather than a guessed value.
+ * #545: resolve the local model digest from the Ollama model list — called only at an index creation
+ * or rebuild boundary. Returns `undefined` when the server is unreachable or reports no digest.
  */
 export async function resolveOllamaModelDigest(
   baseUrl: string = DEFAULT_BASE_URL,

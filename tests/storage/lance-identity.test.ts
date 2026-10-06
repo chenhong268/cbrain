@@ -153,7 +153,7 @@ describe("assertIndexIdentity", () => {
     })).toThrow(/LANCE_IDENTITY_MISMATCH/);
   });
 
-  test("rejects digest drift but tolerates an unresolved digest", () => {
+  test("rejects digest drift and refuses an index whose digest was never recorded", () => {
     expect(() => assertIndexIdentity({
       indexPath,
       expected: ollama1024({ modelDigest: "sha256:new" }),
@@ -161,11 +161,20 @@ describe("assertIndexIdentity", () => {
       schemaDimensions: 1024,
     })).toThrow(/model digest/);
 
-    expect(() => assertIndexIdentity({
-      indexPath, expected: ollama1024(), stored: ollama1024({ modelDigest: "sha256:old" }), schemaDimensions: 1024,
-    })).not.toThrow();
+    // #545 F2: an unresolved stored digest is not a wildcard. An online entry
+    // must not adopt an index whose model it cannot confirm.
     expect(() => assertIndexIdentity({
       indexPath, expected: ollama1024({ modelDigest: "sha256:new" }), stored: ollama1024(), schemaDimensions: 1024,
+    })).toThrow(/LANCE_IDENTITY_DIGEST_MISSING/);
+
+    // The other direction is drift too: a digest-capable model opening an index
+    // that was never labelled with one cannot be confirmed either.
+    expect(() => assertIndexIdentity({
+      indexPath, expected: ollama1024(), stored: ollama1024({ modelDigest: "sha256:old" }), schemaDimensions: 1024,
+    })).toThrow(/model digest/);
+
+    expect(() => assertIndexIdentity({
+      indexPath, expected: ollama1024(), stored: ollama1024(), schemaDimensions: 1024,
     })).not.toThrow();
   });
 

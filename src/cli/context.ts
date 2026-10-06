@@ -18,16 +18,10 @@ import type { TrustedVaultBoundary } from "../core/maintenance/misplaced-vault-a
 const CONFIG_FILE = "cbrain.json";
 
 /**
- * #545: identity of the embedding model the current config selects.
- *
- * Dimensions come from the provider instance, so each width is declared exactly
- * once. The model digest is deliberately NOT resolved here: this runs on every
- * command, and a read path must not talk to the model management API. The
- * rebuild boundary resolves it — see `resolveRebuildIdentity` in
- * `commands/maintenance.ts`.
- *
- * Returns undefined when no provider exists (requireEmbedding=false without a
- * credential): such a caller has no model, so it gets no identity check.
+ * #545: identity of the embedding model the current config selects. Dimensions come from the
+ * provider instance, so each width is declared once. The digest is NOT resolved here — this runs on
+ * every command, and the rebuild boundary resolves it (`resolveRebuildIdentity`). Returns undefined
+ * when no provider exists: such a caller has no model, so it gets no identity check.
  */
 export function resolveVectorIdentity(
   config: CBrainConfig,
@@ -247,17 +241,15 @@ export function createDeps(
         ? new ZhipuEmbeddingProvider(apiKey, config.embedding.baseUrl)
         : (undefined as unknown as EmbeddingProvider);
 
-  // #545: the vector index records the model that built it, and the manager
-  // verifies that identity before any read or write. A config change therefore
-  // cannot silently mix two vector spaces that share a width.
+  // #545: the index records the model that built it and the manager verifies that identity before
+  // any read or write, so a config change cannot silently mix two vector spaces that share a width.
   const vectorIdentity = resolveVectorIdentity(config, embedding);
   const lance = new LanceDBManager({
     ...config.maintenance,
     identity: vectorIdentity,
-    // #545 R1: resolve the local model digest at this initialization boundary —
-    // once per connect(), never per query. When the model server cannot report a
-    // digest, the manager refuses vector writes instead of recording an identity
-    // it could not confirm.
+    // #545 F2: resolve the local model digest at this initialization boundary, once per connect().
+    // When the model server cannot report it, the manager takes no handle at all rather than
+    // reading an index it cannot confirm.
     ...(isOllama && vectorIdentity
       ? { resolveModelDigest: () => resolveOllamaModelDigest(config.embedding.baseUrl, vectorIdentity.model) }
       : {}),

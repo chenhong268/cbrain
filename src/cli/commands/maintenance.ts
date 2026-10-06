@@ -76,8 +76,8 @@ export async function handleReindexVectors(
       },
     });
     if (report.noOp) {
-      // #545: a kept-as-is live index is not a model migration. Saying
-      // "Rebuilt" here would report a successful switch that never happened.
+      // #545: a kept-as-is live index is not a model migration — "Rebuilt" would report a switch
+      // that never happened.
       log("No-op: SQLite 无 chunks/insights 数据 — 保留现有索引及其模型标识，未执行模型迁移。");
     } else {
       log(`Rebuilt:  ${report.chunksRebuilt} pages chunks, ${report.insightsRebuilt} insights`);
@@ -107,12 +107,8 @@ interface RebuildIdentityResolution {
 }
 
 /**
- * #545: identity recorded when a full vector rebuild replaces the index.
- *
- * The digest is resolved at a rebuild boundary, never on a normal read, so a
- * search does not touch the model management API. When the model server cannot
- * confirm the digest, the rebuild is refused instead of recording an identity
- * it could not verify (#545 R1).
+ * #545: identity recorded when a full vector rebuild replaces the index. The digest is resolved at
+ * a rebuild boundary, never on a normal read, so a search does not touch the model management API.
  */
 async function resolveRebuildIdentity(
   config: CBrainConfig,
@@ -446,12 +442,12 @@ export function register(program: Command) {
       if (mode.mode === "reindex-vectors") {
         console.log("Reindexing vectors (atomic staging rebuild)...");
         const resolved = await resolveRebuildIdentity(config, deps.embedding);
-        if (resolved.digestUnavailable) {
-          // #545 R1: fail closed. A rebuild that cannot record the digest of its
-          // model would silently accept a later same-name model change.
+        if (!resolved.identity || resolved.digestUnavailable) {
+          // #545 R1/F1: fail closed — a rebuild that cannot record what produced its vectors must not
+          // replace the live index, neither without an identity nor with an unconfirmed digest.
           console.error(
-            "Error: the model server reported no digest, so the rebuilt index identity cannot be confirmed. "
-            + "Refusing to rebuild. Recovery: start the model server (or fix embedding.baseUrl) and retry.",
+            "Error: the identity of the embedding model could not be confirmed, so the rebuilt index cannot be "
+            + "labelled. Refusing to rebuild. Recovery: start the model server (or fix embedding.baseUrl) and retry.",
           );
           process.exitCode = 1;
           return;

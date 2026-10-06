@@ -72,12 +72,29 @@ function seedPage(db: CBrainDB, slug: string, rawChunks: string[], l1Summary?: s
     db.rawDb
       .prepare("INSERT OR IGNORE INTO chunks (page_slug, chunk_index, content, summary_level) VALUES (?, ?, ?, 0)")
       .run(slug, i, rawChunks[i]);
+    // Mirrors the real chunk write path: the trigram FTS table is maintained
+    // alongside `chunks`, so a rejected vector write must leave both untouched.
+    db.rawDb.prepare("INSERT INTO chunks_fts (page_slug, content) VALUES (?, ?)").run(slug, rawChunks[i]);
   }
   if (l1Summary) {
     db.rawDb
       .prepare("INSERT OR IGNORE INTO chunks (page_slug, chunk_index, content, summary_level) VALUES (?, -1, ?, 1)")
       .run(slug, l1Summary);
   }
+}
+
+/** Everything a vector rebuild must not change: facts, FTS rows, and MATCH hits. */
+function semanticState(db: CBrainDB) {
+  return {
+    pages: db.rawDb.prepare("SELECT slug, content_hash FROM pages ORDER BY slug").all(),
+    chunks: db.rawDb
+      .prepare("SELECT page_slug, chunk_index, content, summary_level FROM chunks ORDER BY page_slug, chunk_index")
+      .all(),
+    fts: db.rawDb.prepare("SELECT page_slug, content FROM chunks_fts ORDER BY page_slug, content").all(),
+    match: db.rawDb
+      .prepare("SELECT page_slug, content FROM chunks_fts WHERE chunks_fts MATCH ? ORDER BY page_slug")
+      .all("chunk"),
+  };
 }
 
 describe("1024d local index on a real LanceDB directory", () => {
@@ -176,10 +193,12 @@ describe("1024d local index on a real LanceDB directory", () => {
 
     await expect(new LanceDBManager({ identity: { ...LOCAL, modelDigest: "sha256:new" } }).connect(lancePath))
       .rejects.toThrow(/model digest/);
-    // An unresolved digest is not a mismatch: the same index stays readable.
+    // #545 F2: an unresolved stored digest is not a wildcard — a confirmed model
+    // must not adopt an index whose model it cannot check.
     await expect(new LanceDBManager({ identity: { ...LOCAL, modelDigest: "sha256:old" } }).connect(lancePath))
       .resolves.toBeUndefined();
-    await expect(new LanceDBManager({ identity: LOCAL }).connect(lancePath)).resolves.toBeUndefined();
+    await expect(new LanceDBManager({ identity: LOCAL }).connect(lancePath))
+      .rejects.toThrow(/model digest/);
   });
 
   test("refuses a damaged identity file", async () => {
@@ -513,14 +532,14 @@ describe("second round: write validation, refused-handle state, identity provena
     // The page path refuses the width before its destructive step, so the live
     // rows were never touched (status aborted_unchanged, not rolled back).
     expect(result.status).toBe("aborted_unchanged");
-    expect(result.reason).toMatch(/dimension mismatch/);
+    expect(result.reason).toMatch(/VECTOR_DIMENSION_MISMATCH/);
     const rows = await lance.readRawVectorRows("entities/local");
     expect(rows.length).toBe(1);
     expect(rows[0].content).toBe("chunk one");
     await lance.close();
   });
 
-  test("the single-page recovery path refuses a non-finite provider vector and restores the page", async () => {
+  test("the single-page recovery path refuses a non-finite provider vector without touching the page", async () => {
     seedPage(db, "entities/local", ["chunk one", "chunk two"]);
     const lance = new LanceDBManager({ identity: LOCAL });
     await lance.connect(lancePath);
@@ -533,10 +552,51 @@ describe("second round: write validation, refused-handle state, identity provena
       pageSlug: "entities/local",
       lancePath,
     });
-    expect(result.status).toBe("failed_rolled_back");
+    // #545 F1: the refusal now happens while the page is still intact, so this is
+    // an abort — not a rollback.
+    expect(result.status).toBe("aborted_unchanged");
     expect(result.reason).toMatch(/VECTOR_VALUE_INVALID/);
     const rows = await lance.readRawVectorRows("entities/local");
     expect(rows.map((row) => row.content)).toEqual(["chunk one"]);
+    await lance.close();
+  });
+
+  test("a rejected page rebuild performs no delete and leaves SQLite, FTS, the rows and the identity alone", async () => {
+    seedPage(db, "entities/local", ["chunk one", "chunk two"]);
+    const lance = new LanceDBManager({ identity: LOCAL });
+    await lance.connect(lancePath);
+    await lance.addChunks([{
+      pageSlug: "entities/local",
+      chunkIndex: 0,
+      content: "chunk one",
+      vector: new Float32Array(vectorFor("chunk one", 1024)),
+    }]);
+
+    const before = semanticState(db);
+    const rowsBefore = await lance.readRawVectorRows("entities/local");
+    const identityBefore = readFileSync(identityFilePath(lancePath));
+    // #545 F1: count the destructive call itself, not just its visible effect.
+    let deletes = 0;
+    const realDelete = lance.deleteRawChunksByPageSlug.bind(lance);
+    lance.deleteRawChunksByPageSlug = (async (slug: string) => {
+      deletes += 1;
+      return realDelete(slug);
+    }) as typeof lance.deleteRawChunksByPageSlug;
+
+    const wrongWidth = await rebuildPageVectors({
+      db, lance, embedding: provider(1024, 128), pageSlug: "entities/local", lancePath,
+    });
+    const nonFinite = await rebuildPageVectors({
+      db, lance, embedding: brokenProvider((vec) => { vec[2] = Number.NaN; return vec; }),
+      pageSlug: "entities/local", lancePath,
+    });
+
+    expect(wrongWidth.status).toBe("aborted_unchanged");
+    expect(nonFinite.status).toBe("aborted_unchanged");
+    expect(deletes).toBe(0);
+    expect(semanticState(db)).toEqual(before);
+    expect(await lance.readRawVectorRows("entities/local")).toEqual(rowsBefore);
+    expect(readFileSync(identityFilePath(lancePath)).equals(identityBefore)).toBe(true);
     await lance.close();
   });
 

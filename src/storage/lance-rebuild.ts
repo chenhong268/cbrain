@@ -37,11 +37,8 @@ export interface RebuildResult {
   readonly errorDetails: readonly string[];
   /** Path to backup of old live directory, or null */
   readonly backupPath: string | null;
-  /**
-   * #545: true when nothing was rebuilt because SQLite held no source data.
-   * The live index (and its identity) were kept as-is — a no-op is NOT a model
-   * migration and must never be reported as one.
-   */
+  /** #545: true when SQLite held no source data, so the live index and its identity were kept
+   * as-is. A no-op is NOT a model migration and must never be reported as one. */
   readonly noOp: boolean;
 }
 
@@ -69,11 +66,8 @@ export interface RebuildOptions {
   readonly chunkBatchSize?: number;
   readonly insightBatchSize?: number;
   readonly onProgress?: (progress: RebuildProgress) => void;
-  /**
-   * #545: identity of the embedding model producing these vectors. Written into
-   * the staging directory after verification, so the new index always carries
-   * the model that built it (and a failed rebuild changes nothing).
-   */
+  /** #545: identity of the model producing these vectors, written into the staging directory after
+   * verification, so a new index always carries the model that built it. */
   readonly identity?: VectorIndexIdentity;
 }
 
@@ -111,9 +105,8 @@ async function embedInBatches<T>(input: {
     if (embedded.length !== rows.length) {
       throw new Error(`EMBEDDING_COUNT_MISMATCH: ${input.phase} batch returned ${embedded.length}, expected ${rows.length}`);
     }
-    // #545 R2: the staging schema is built from the provider's declared width, so
-    // a provider that returns another width — or a NaN / Infinity / Float32
-    // overflow value — must fail here, before any row reaches the table.
+    // #545 R2: a provider that returns another width — or a NaN / Infinity / Float32 overflow
+    // value — must fail here, before any row reaches the table.
     for (const [index, result] of embedded.entries()) {
       assertStorableVector(result.embedding, input.dimensions, `${input.phase} provider row ${offset + index}`);
     }
@@ -131,10 +124,8 @@ async function embedInBatches<T>(input: {
 }
 
 /**
- * #545 R2: check the vectors the staging index actually stores — not only the
- * ones the provider returned. Reading them back catches a store that silently
- * pads, truncates, or coerces a row. Paged, so a large index does not need a
- * second full copy of every vector in memory.
+ * #545 R2: check the vectors the staging index actually stores — not only the ones the provider
+ * returned. Reading them back catches a store that silently pads, truncates, or coerces a row.
  */
 async function verifyStoredVectors(input: {
   conn: lancedb.Connection;
@@ -209,16 +200,15 @@ export async function rebuildLanceIndex(
   // ── No-op: empty SQLite ──
   if (!hasSqliteData) {
     if (liveExists) {
-      // Don't replace a working live index with empty staging. The live index
-      // keeps its own identity: this preserves an index, it does not migrate one.
+      // Don't replace a working live index with empty staging: this preserves an index, it does not
+      // migrate one, and the live index keeps its own identity.
       return {
         chunksRebuilt: 0, insightsRebuilt: 0, errors: 0,
         errorDetails: [], backupPath: null, noOp: true,
       };
     }
-    // No data anywhere — create an empty live directory. No identity is written:
-    // with no tables there is no index to describe yet. The identity is committed
-    // when the first table is created and by the first real rebuild.
+    // No data anywhere — create an empty live directory and write no identity: with no tables there
+    // is no index to describe yet (#545 R4).
     fs.mkdirSync(lancePath, { recursive: true });
     return {
       chunksRebuilt: 0, insightsRebuilt: 0, errors: 0,
@@ -332,8 +322,7 @@ export async function rebuildLanceIndex(
       }
     }
 
-    // #545 R2: validate the vectors staging actually stores, not only the ones
-    // the provider returned, before anything can be committed.
+    // #545 R2: validate the vectors staging actually stores, not only the ones the provider returned.
     if (chunkRows.length > 0) {
       await verifyStoredVectors({ conn: stagingConn, tableName: "chunks", dimensions, expectedRows: chunkRows.length });
     }
@@ -341,9 +330,8 @@ export async function rebuildLanceIndex(
       await verifyStoredVectors({ conn: stagingConn, tableName: "insights", dimensions, expectedRows: insightRows.length });
     }
 
-    // #545: commit the model identity only after staging verified. It travels
-    // with the directory swap, so a failed build leaves the old index and its
-    // own identity in place.
+    // #545: commit the model identity only after staging verified — it travels with the directory
+    // swap, so a failed build leaves the old index and its own identity in place.
     if (identity) writeIndexIdentity(stagingPath, identity);
 
     // Close staging before filesystem operations

@@ -154,7 +154,7 @@ describe("#545 R1 — model digest at the initialization boundary", () => {
     await check.close();
   });
 
-  test("an unreadable digest keeps reads working and refuses writes", async () => {
+  test("an unreadable digest refuses the online handle and creates nothing", async () => {
     const lancePath = lanceDir("lance-offline");
     const first = new LanceDBManager({ identity: identity({ modelDigest: "digest-current" }) });
     await first.connect(lancePath);
@@ -164,14 +164,13 @@ describe("#545 R1 — model digest at the initialization boundary", () => {
     tagsResponse = { status: 500 };
     const deps = createDeps(config(), true);
     try {
-      // Offline diagnostics must still open the index and read it.
-      await deps.lance.connect(lancePath);
-      expect(await deps.lance.getIndexedPageSlugs()).toEqual(["entities/a"]);
-      // An index whose model cannot be confirmed must not grow.
-      await expect(deps.lance.addChunks([chunk("entities/new", 0, 2)]))
-        .rejects.toThrow(/LANCE_IDENTITY_DIGEST_UNAVAILABLE/);
-      await expect(deps.lance.addInsightVector({ id: 1, content: "insight", vector: vector(3) }))
-        .rejects.toThrow(/LANCE_IDENTITY_DIGEST_UNAVAILABLE/);
+      // #545 F2: a model that cannot be confirmed gets no handle at all — not
+      // even a read, and no table creation or identity backfill.
+      await expect(deps.lance.connect(lancePath)).rejects.toThrow(/LANCE_IDENTITY_DIGEST_UNAVAILABLE/);
+      // A refused connect leaves no usable handle behind (#545 R3).
+      await expect(deps.lance.addChunks([chunk("entities/new", 0, 2)])).rejects.toThrow(/not connected/);
+      await expect(deps.lance.search(Array.from(vector(1)), 5)).rejects.toThrow(/not connected/);
+      await expect(deps.lance.warmup()).rejects.toThrow(/not connected/);
     } finally {
       await deps.lance.close();
       deps.db.close();
@@ -182,6 +181,34 @@ describe("#545 R1 — model digest at the initialization boundary", () => {
     await check.connect(lancePath);
     expect(await check.getIndexedPageSlugs()).toEqual(["entities/a"]);
     await check.close();
+  });
+
+  test("every connect resolves the digest again, so a swap between sessions is caught", async () => {
+    const lancePath = lanceDir("lance-reconnect");
+    const deps = createDeps(config(), true);
+    try {
+      await deps.lance.connect(lancePath);
+      await deps.lance.addChunks([chunk("entities/a", 0, 1)]);
+      expect(tagsCalls).toBe(1);
+      await deps.lance.close();
+
+      // #545 F3: the resolved digest must not survive a close/connect cycle.
+      tagsResponse = { status: 200, digest: "digest-swapped" };
+      await expect(deps.lance.connect(lancePath)).rejects.toThrow(/LANCE_IDENTITY_MISMATCH/);
+      expect(tagsCalls).toBe(2);
+      await expect(deps.lance.addChunks([chunk("entities/b", 0, 2)])).rejects.toThrow(/not connected/);
+
+      // Recovery: once the confirmed model is back, reconnect works again.
+      tagsResponse = { status: 200, digest: "digest-current" };
+      await deps.lance.connect(lancePath);
+      expect(await deps.lance.getIndexedPageSlugs()).toEqual(["entities/a"]);
+      expect(tagsCalls).toBe(3);
+    } finally {
+      await deps.lance.close();
+      deps.db.close();
+    }
+
+    expect(readIndexIdentity(lancePath)?.modelDigest).toBe("digest-current");
   });
 
   test("a provider without a digest endpoint never talks to the model management API", async () => {

@@ -1,19 +1,15 @@
 /**
- * #545: vector index identity — a lightweight, per-index record of the model
- * that produced the vectors, stored next to the LanceDB tables.
+ * #545: vector index identity — a per-index record of the model that produced
+ * the vectors, stored next to the LanceDB tables.
  *
- * Why: a dimension check alone cannot distinguish two models that emit the same
- * width. Switching `embedding.provider` from a cloud model to a local one (or
- * between two 2048d models) keeps every row readable but makes recall garbage,
- * because the vector spaces differ. The identity file is the only durable
- * evidence of what actually wrote the index.
+ * A width check cannot distinguish two models that emit the same dimension:
+ * switching provider (cloud ↔ local, or between two 2048d models) keeps every row
+ * readable but makes recall garbage, because the vector spaces differ.
  *
- * Invariants:
- *   - Written only when an index is created or rebuilt (never on a read path).
- *   - Committed together with the verified staging directory, so a failed
- *     rebuild always leaves the live index and its identity untouched.
- *   - Malformed or schema-inconsistent identity fails closed; it is never
- *     silently repaired, backfilled, or ignored.
+ * Invariants: written only when an index is created or rebuilt (never on a read
+ * path); committed together with the verified staging directory, so a failed
+ * rebuild leaves the live index and its identity untouched; malformed or
+ * schema-inconsistent identity fails closed and is never repaired or backfilled.
  */
 import { Field, FixedSizeList, Float32, Int32, Schema, Utf8 } from "apache-arrow";
 import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
@@ -21,11 +17,11 @@ import { join } from "node:path";
 
 /** Document encoding strategy. Bump when how documents are encoded changes. */
 export const DOCUMENT_ENCODING_VERSION = 1;
-
 /** Legacy index width that predates the identity file (Zhipu / deterministic). */
 export const LEGACY_VECTOR_DIMENSIONS = 2048;
-
 export const INDEX_IDENTITY_FILENAME = "cbrain-index-identity.json";
+/** Shared recovery pointer for identity failures. */
+export const REBUILD_HINT = "Recovery: stop serve/watcher → cbrain sync --reindex-vectors → restart.";
 
 export interface VectorIndexIdentity {
   /** Embedding provider id: "zhipu" | "ollama" | "deterministic". */
@@ -36,8 +32,8 @@ export interface VectorIndexIdentity {
   /** Version of the document encoding strategy used for these vectors. */
   readonly documentEncoding: number;
   /**
-   * Local model digest, recorded when the model server can report it. Absent
-   * means "not resolved" (offline), never "matches anything with a digest".
+   * Model digest, recorded when the model server can report one. Absent means
+   * "not resolved" (offline), never "matches anything with a digest".
    */
   readonly modelDigest?: string;
 }
@@ -57,19 +53,16 @@ export interface VectorSchemaSet {
 
 /** Narrow schema generator shared by the live manager and the full rebuilder. */
 export function vectorSchemas(dimensions: number): VectorSchemaSet {
-  const vector = () => new FixedSizeList(dimensions, new Field("item", new Float32(), false));
+  const vector = () =>
+    new Field("vector", new FixedSizeList(dimensions, new Field("item", new Float32(), false)), false);
   return {
     chunks: new Schema([
       new Field("pageSlug", new Utf8(), false),
       new Field("chunkIndex", new Int32(), false),
       new Field("content", new Utf8(), false),
-      new Field("vector", vector(), false),
+      vector(),
     ]),
-    insights: new Schema([
-      new Field("id", new Int32(), false),
-      new Field("content", new Utf8(), false),
-      new Field("vector", vector(), false),
-    ]),
+    insights: new Schema([new Field("id", new Int32(), false), new Field("content", new Utf8(), false), vector()]),
   };
 }
 
@@ -80,23 +73,25 @@ export function vectorIndexIdentity(input: {
   documentEncoding?: number;
   modelDigest?: string;
 }): VectorIndexIdentity {
-  if (!input.provider) throw new VectorIdentityError("index identity requires a provider id");
-  if (!input.model) throw new VectorIdentityError("index identity requires a model id");
+  if (!input.provider || !input.model) throw new VectorIdentityError("index identity requires a provider id and a model id");
   if (!Number.isInteger(input.dimensions) || input.dimensions < 1) {
     throw new VectorIdentityError(`index identity requires a positive integer dimension, got ${input.dimensions}`);
   }
-  const identity: VectorIndexIdentity = {
+  return {
     provider: input.provider,
     model: input.model,
     dimensions: input.dimensions,
     documentEncoding: input.documentEncoding ?? DOCUMENT_ENCODING_VERSION,
     ...(input.modelDigest ? { modelDigest: input.modelDigest } : {}),
   };
-  return identity;
 }
 
 export function identityFilePath(indexPath: string): string {
   return join(indexPath, INDEX_IDENTITY_FILENAME);
+}
+
+function corrupt(path: string, detail: string): VectorIdentityError {
+  return new VectorIdentityError(`LANCE_IDENTITY_CORRUPT: ${path} ${detail}. ${REBUILD_HINT}`);
 }
 
 function parseIdentity(raw: string, path: string): VectorIndexIdentity {
@@ -104,10 +99,7 @@ function parseIdentity(raw: string, path: string): VectorIndexIdentity {
   try {
     parsed = JSON.parse(raw);
   } catch (e) {
-    throw new VectorIdentityError(
-      `LANCE_IDENTITY_CORRUPT: ${path} is not valid JSON (${e instanceof Error ? e.message : String(e)}). `
-      + "Recovery: stop serve/watcher → cbrain sync --reindex-vectors → restart.",
-    );
+    throw corrupt(path, `is not valid JSON (${e instanceof Error ? e.message : String(e)})`);
   }
   const value = parsed as Partial<VectorIndexIdentity> | null;
   const ok = value && typeof value === "object"
@@ -116,12 +108,7 @@ function parseIdentity(raw: string, path: string): VectorIndexIdentity {
     && Number.isInteger(value.dimensions) && (value.dimensions as number) > 0
     && Number.isInteger(value.documentEncoding)
     && (value.modelDigest === undefined || typeof value.modelDigest === "string");
-  if (!ok) {
-    throw new VectorIdentityError(
-      `LANCE_IDENTITY_CORRUPT: ${path} is missing required identity fields. `
-      + "Recovery: stop serve/watcher → cbrain sync --reindex-vectors → restart.",
-    );
-  }
+  if (!ok) throw corrupt(path, "is missing required identity fields");
   return value as VectorIndexIdentity;
 }
 
@@ -150,15 +137,14 @@ export function writeIndexIdentity(indexPath: string, identity: VectorIndexIdent
 }
 
 function describe(identity: VectorIndexIdentity): string {
+  const digest = identity.modelDigest ? ` digest=${identity.modelDigest.slice(0, 12)}` : "";
   return `provider=${identity.provider} model=${identity.model} dimensions=${identity.dimensions}`
-    + ` encoding=${identity.documentEncoding}${identity.modelDigest ? ` digest=${identity.modelDigest.slice(0, 12)}` : ""}`;
+    + ` encoding=${identity.documentEncoding}${digest}`;
 }
 
-const REBUILD_HINT = "Recovery: stop serve/watcher → cbrain sync --reindex-vectors → restart.";
-
 /**
- * Fail closed unless the stored identity is compatible with the expected one
- * and with the dimensions actually present in the table schema.
+ * Fail closed unless the stored identity is compatible with the expected one and
+ * with the width really present in the table schema.
  *
  * `expected` is null for callers with no provider context (offline probes); they
  * still get the schema/identity consistency check.
@@ -183,12 +169,11 @@ export function assertIndexIdentity(input: {
 
   if (!stored) {
     // Approved long-term compatibility: an unlabelled index is accepted only for
-    // the legacy Zhipu 2048 layout, verified by schema. It is never relabelled
-    // on a read path, and it is never treated as the configured local model.
-    if (expected.provider === "zhipu" && expected.dimensions === LEGACY_VECTOR_DIMENSIONS
-      && schemaDimensions === LEGACY_VECTOR_DIMENSIONS) {
-      return;
-    }
+    // the legacy Zhipu 2048 layout, verified by schema. It is never relabelled on
+    // a read path, and never treated as the configured local model.
+    const legacy = expected.provider === "zhipu" && expected.dimensions === LEGACY_VECTOR_DIMENSIONS
+      && schemaDimensions === LEGACY_VECTOR_DIMENSIONS;
+    if (legacy) return;
     throw new VectorIdentityError(
       `LANCE_IDENTITY_MISSING: ${input.indexPath} has no index identity and is not a legacy 2048d Zhipu index `
       + `(expected ${describe(expected)}${schemaDimensions === null ? "" : `, found ${schemaDimensions}d`}). `
@@ -203,9 +188,16 @@ export function assertIndexIdentity(input: {
   if (stored.documentEncoding !== expected.documentEncoding) {
     mismatches.push(`document encoding ${stored.documentEncoding} != ${expected.documentEncoding}`);
   }
-  // Digest drift is only decidable when both sides resolved one.
-  if (stored.modelDigest && expected.modelDigest && stored.modelDigest !== expected.modelDigest) {
-    mismatches.push(`model digest ${stored.modelDigest.slice(0, 12)} != ${expected.modelDigest.slice(0, 12)}`);
+  // #545 F2: the digest is part of the identity. An index that recorded none stays
+  // readable offline, but a confirmed model must not adopt it online.
+  if (stored.modelDigest !== expected.modelDigest) {
+    if (stored.modelDigest === undefined) {
+      throw new VectorIdentityError(
+        `LANCE_IDENTITY_DIGEST_MISSING: ${input.indexPath} records ${describe(stored)} without a model digest, so it `
+        + `cannot be confirmed against the configured model. ${REBUILD_HINT}`,
+      );
+    }
+    mismatches.push(`model digest ${stored.modelDigest.slice(0, 12)} != ${expected.modelDigest?.slice(0, 12) ?? "none"}`);
   }
   if (mismatches.length > 0) {
     throw new VectorIdentityError(
@@ -226,35 +218,27 @@ export function vectorColumnDimensions(schema: { fields?: Array<{ name: string; 
 }
 
 /**
- * #545 R2: reject a vector the index cannot store faithfully.
- *
- * Width alone is not enough. The store accepts a short vector and reads it back
- * padded, and NaN / Infinity / a value that overflows Float32 are stored
- * without an error — recall then degrades silently instead of failing. Callers
- * validate a whole batch BEFORE the first row is written, so one bad vector
- * writes nothing, and they never pad or truncate a vector to make it fit.
+ * #545 R2: reject a vector the index cannot store faithfully. Width alone is not
+ * enough — the store accepts a short vector (and reads it back padded), and it
+ * stores NaN / Infinity / Float32 overflow without an error, so recall degrades
+ * silently instead of failing. Callers validate a whole batch BEFORE the first
+ * row is written, and never pad or truncate a vector to make it fit.
  */
 export function assertStorableVector(vector: ArrayLike<number>, dimensions: number, label: string): void {
   if (vector.length !== dimensions) {
     throw new VectorIdentityError(
-      `VECTOR_DIMENSION_MISMATCH: ${label} carries ${vector.length}d, the index stores ${dimensions}d. `
-      + "Refusing to write a vector that cannot be read back unchanged. Align the embedding provider with the "
-      + "index width, or rebuild the index with the configured model. Do not pad or truncate the vector.",
+      `VECTOR_DIMENSION_MISMATCH: ${label} carries ${vector.length}d, the index stores ${dimensions}d. Refusing to `
+      + "write a vector that cannot be read back unchanged. Align the embedding provider with the index width, or "
+      + "rebuild the index with the configured model. Do not pad or truncate the vector.",
     );
   }
   for (let i = 0; i < vector.length; i++) {
     const value = vector[i];
-    if (!Number.isFinite(value)) {
+    const stored = Math.fround(value);
+    if (!Number.isFinite(value) || !Number.isFinite(stored)) {
       throw new VectorIdentityError(
-        `VECTOR_VALUE_INVALID: ${label}[${i}] is ${value}. A non-finite value carries no direction. `
-        + "The embedding provider produced a broken vector; fix the provider or rebuild the index.",
-      );
-    }
-    const f32 = Math.fround(value);
-    if (!Number.isFinite(f32)) {
-      throw new VectorIdentityError(
-        `VECTOR_VALUE_INVALID: ${label}[${i}] = ${value} overflows Float32 and would be stored as ${f32}. `
-        + "The embedding provider produced a broken vector; fix the provider or rebuild the index.",
+        `VECTOR_VALUE_INVALID: ${label}[${i}] is ${value} and would be stored as ${stored}. A value that is not `
+        + "finite carries no direction; the provider produced a broken vector. Fix the provider or rebuild the index.",
       );
     }
   }
