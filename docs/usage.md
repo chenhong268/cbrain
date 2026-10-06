@@ -240,6 +240,26 @@ Obsidian 中的 `[[wikilink]]` 会被 CBrain 识别为知识图谱链接。
 
 环境变量（推荐）：`ZHIPU_API_KEY` —— 优先用环境变量，避免把密钥写进可能被同步或分享的配置文件；config 里的 `embedding.apiKey` / `ner.llm_api_key` 仍可作为备选。可选的 DeepSeek（reflect）目前只能走 config 字段 `reflect.llm_api_key`，尚无环境变量快捷方式。
 
+### 可选本地 embedding provider（#544）
+
+本地 provider 使用本机 Ollama，不发送 embedding 文本到云端，也不需要 `ZHIPU_API_KEY`：
+
+```json
+{
+  "embedding": {
+    "provider": "ollama",
+    "baseUrl": "http://127.0.0.1:11434",
+    "model": "qwen3-embedding:0.6b"
+  }
+}
+```
+
+- 启动前先拉取模型：`ollama pull qwen3-embedding:0.6b`。
+- `baseUrl` 与 `model` 可省略，默认值为 `http://127.0.0.1:11434` 与 `qwen3-embedding:0.6b`。
+- 该 provider 输出 1024 维向量，与本仓库当前的 2048 维生产索引不兼容。生产索引迁移由后续工作处理；切换前不要对其现网库直接启用。
+- `provider` 只接受 `zhipu`、`ollama`、`deterministic`。其他值会直接报错，不再回退到云端。
+- NER / reflect 的凭据独立，选择本地 provider 不会关闭已正确配置的 LLM。
+
 ### 可选 search provider
 
 `search` 配置只服务于网页补充场景，不是本地记忆检索的依赖。默认不写 `search` 即为关闭：

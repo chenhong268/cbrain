@@ -6,6 +6,7 @@ import type { EmbeddingProvider } from "../../embedding/provider.js";
 import { LanceDBManager } from "../../storage/lancedb.js";
 import { checkLanceIntegrity } from "../../storage/lance-integrity.js";
 import { ZhipuEmbeddingProvider } from "../../embedding/zhipu.js";
+import { OllamaEmbeddingProvider, OLLAMA_DEFAULT_MODEL } from "../../embedding/ollama.js";
 import { ZhipuLLMProvider } from "../../llm/zhipu.js";
 import { DeepSeekLLMProvider } from "../../llm/deepseek.js";
 import { loadConfig, loadConfigWithPath, createDeps, resolveRuntimePath } from "../context.js";
@@ -646,17 +647,32 @@ export function register(program: Command) {
       } catch (e) { console.error(`  DB:      FAIL — ${(e as Error).message}`); ok = false; }
       if (existsSync(config.vaultPath)) { console.log(`  Vault:   ${config.vaultPath} ✓`); }
       else { console.error(`  Vault:   ${config.vaultPath} NOT FOUND`); ok = false; }
-      const apiKey = config.embedding.apiKey ?? process.env.ZHIPU_API_KEY;
-      if (apiKey) {
+      // #544: probe the provider the config actually selects, so a valid local
+      // Ollama setup is not reported as a missing cloud credential.
+      const provider = config.embedding.provider ?? "zhipu";
+      const cloudApiKey = config.embedding.apiKey ?? process.env.ZHIPU_API_KEY;
+      if (provider === "deterministic") {
+        console.log("  Embed:   deterministic (in-process test provider) ✓");
+      } else if (provider === "ollama") {
         try {
-          const emb = new ZhipuEmbeddingProvider(apiKey, config.embedding.baseUrl);
+          const model = config.embedding.model ?? OLLAMA_DEFAULT_MODEL;
+          const emb = new OllamaEmbeddingProvider(config.embedding.baseUrl, model);
+          const result = await emb.embed("test");
+          console.log(`  Embed:   ollama ${model} (${result.embedding.length}d) ✓`);
+        } catch (e) { console.error(`  Embed:   FAIL — ${(e as Error).message}`); ok = false; }
+      } else if (provider !== "zhipu") {
+        console.error(`  Embed:   FAIL — unknown embedding.provider "${provider}"`);
+        ok = false;
+      } else if (cloudApiKey) {
+        try {
+          const emb = new ZhipuEmbeddingProvider(cloudApiKey, config.embedding.baseUrl);
           const result = await emb.embed("test");
           console.log(`  Embed:   zhipu embedding-3 (${result.embedding.length}d) ✓`);
         } catch (e) { console.error(`  Embed:   FAIL — ${(e as Error).message}`); ok = false; }
       } else { console.error("  Embed:   ZHIPU_API_KEY not configured"); ok = false; }
       const nerEnabled = config.ner?.enabled !== false;
       if (nerEnabled) {
-        const nerApiKey = config.ner?.llm_api_key ?? apiKey ?? process.env.ZHIPU_API_KEY;
+        const nerApiKey = config.ner?.llm_api_key ?? cloudApiKey;
         if (nerApiKey) {
           try {
             const _llm = new ZhipuLLMProvider(nerApiKey, config.ner?.llm_base_url, config.ner?.llm_model);

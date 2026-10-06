@@ -4,6 +4,20 @@
 
 ## [Unreleased]
 
+### 本地 embedding provider 接入（#544）
+
+- `embedding.provider` 新增取值 `ollama`，通过本机 `/api/embed` 使用 `qwen3-embedding:0.6b`，输出 1024 维。选择该 provider 时不上传 embedding 文本到云端，也不需要 `ZHIPU_API_KEY`。
+- `embedding.provider` 改为显式分支：未知取值直接报错，不再静默回退到 Zhipu。
+- 新增编码用途 `query` / `document`（默认 `document`）。`HybridSearch` 与 `InsightManager.queryInsights` 显式使用 `query`；写入、摘要与实体相似度比较保持 `document`。
+- Ollama 请求固定 `truncate:false`；响应按数量、维度、有限数值、归一化有效性校验（零向量与溢出到非有限 norm 都直接报错），查询与文档向量统一 L2 归一化。失败不回退云端、不返回伪向量、不缩短正文。
+- 批量上限、超时、重试与调用方 `AbortSignal` 沿用既有 Zhipu 路径的预算。
+
+### Compatibility / Migration
+
+- 默认 provider 仍为 Zhipu；既有配置、确定性 provider 与 NER / reflect 独立凭据合同不变。
+- 未新增 MCP tool、CLI command/flag 或 HTTP endpoint。
+- 未执行生产迁移：现有 2048 维生产索引未切换，本轮不启用 Qwen 生产索引，也未验证召回质量。
+
 ## [v2.1.0] — 2026-10-05
 
 ### 关系自引用写入防线（#539）

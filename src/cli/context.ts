@@ -4,6 +4,7 @@ import { dirname, join, resolve } from "node:path";
 import { CBrainDB } from "../storage/sqlite.js";
 import { LanceDBManager } from "../storage/lancedb.js";
 import { ZhipuEmbeddingProvider } from "../embedding/zhipu.js";
+import { OllamaEmbeddingProvider } from "../embedding/ollama.js";
 import { DeterministicEmbeddingProvider } from "../embedding/deterministic.js";
 import type { EmbeddingProvider } from "../embedding/provider.js";
 import { ZhipuLLMProvider } from "../llm/zhipu.js";
@@ -27,6 +28,8 @@ export interface CBrainConfig {
     provider: string;
     apiKey?: string;
     baseUrl?: string;
+    /** #544: Ollama embedding model. Defaults to qwen3-embedding:0.6b. */
+    model?: string;
   };
   ner?: {
     enabled?: boolean;
@@ -184,23 +187,41 @@ export function createDeps(
 ): CBrainDeps {
   const loaded = "config" in input && "configPath" in input ? input : undefined;
   const config = loaded?.config ?? input as CBrainConfig;
+  const embeddingProvider = config.embedding.provider ?? "zhipu";
+  // #544: explicit provider branch. An unknown provider used to fall through
+  // to Zhipu, which silently sent embedding text to the cloud. Reject it
+  // before any DB handle is opened.
+  if (
+    embeddingProvider !== "zhipu" &&
+    embeddingProvider !== "ollama" &&
+    embeddingProvider !== "deterministic"
+  ) {
+    throw new Error(
+      `Unknown embedding.provider "${embeddingProvider}" (expected "zhipu", "ollama", or "deterministic").`,
+    );
+  }
   const lance = new LanceDBManager(config.maintenance);
   const db = new CBrainDB(config.dbPath);
-  const embeddingProvider = config.embedding.provider ?? "zhipu";
   const isDeterministic = embeddingProvider === "deterministic";
+  const isOllama = embeddingProvider === "ollama";
   const apiKey = config.embedding.apiKey ?? process.env.ZHIPU_API_KEY;
   // (#204) deterministic provider is in-process: no credentials, no socket.
+  // (#544) the local Ollama provider needs no cloud credential either.
   // Production "zhipu" still requires an API key.
-  if (!apiKey && requireEmbedding && !isDeterministic) {
+  if (!apiKey && requireEmbedding && !isDeterministic && !isOllama) {
     console.error("Error: ZHIPU_API_KEY not set (env or cbrain.json).");
     process.exit(1);
   }
   const embedding: EmbeddingProvider = isDeterministic
     ? new DeterministicEmbeddingProvider()
-    : apiKey
-      ? new ZhipuEmbeddingProvider(apiKey, config.embedding.baseUrl)
-      : (undefined as unknown as EmbeddingProvider);
+    : isOllama
+      ? new OllamaEmbeddingProvider(config.embedding.baseUrl, config.embedding.model)
+      : apiKey
+        ? new ZhipuEmbeddingProvider(apiKey, config.embedding.baseUrl)
+        : (undefined as unknown as EmbeddingProvider);
 
+  // #544: NER/reflect credentials stay a separate contract. Removing the
+  // embedding cloud key must not switch off an already-configured LLM.
   const nerEnabled = config.ner?.enabled !== false;
   const nerApiKey = config.ner?.llm_api_key ?? apiKey ?? process.env.ZHIPU_API_KEY;
   const llm = (nerEnabled && nerApiKey)
