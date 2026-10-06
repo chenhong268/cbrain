@@ -246,6 +246,8 @@ function makeHarness(
       },
     },
     db,
+    // #550: unverified fake connection, so the Qwen content fallback stays off.
+    lance: { vectorIdentitySnapshot: () => null },
     logger: {
       info(...args: unknown[]) { logCalls.push(args); },
       warn(...args: unknown[]) { logCalls.push(args); },
@@ -375,6 +377,8 @@ describe("content frontdoor honesty sequencing", () => {
         search,
         db,
         pages: { getBySlug: (slug: string) => pages.get(slug) ?? null },
+        // #550: unverified fake connection, so the Qwen content fallback stays off.
+        lance: { vectorIdentitySnapshot: () => null },
       } as never);
 
       for (const [query, expectedTitle] of [
@@ -1633,6 +1637,8 @@ describe("retrieval support privacy matrix", () => {
         search,
         pages: { getBySlug: () => ({ title: "匿名文档", body: "匿名正文" }) },
         db,
+        // #550: unverified fake connection, so the Qwen content fallback stays off.
+        lance: { vectorIdentitySnapshot: () => null },
       } as never);
       const output = await handler!({ query });
       const envelope = parsed(output) as { summary: { status: string; count: number } };

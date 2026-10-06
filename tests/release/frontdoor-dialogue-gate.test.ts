@@ -46,6 +46,8 @@ function createMockLanceDB() {
     deleteRawChunksByPageSlug: async () => {},
     close: async () => {},
     createFTSIndex: async () => {},
+    // #550: unverified fake connection, so the Qwen content fallback stays off.
+    vectorIdentitySnapshot: () => null,
   };
 }
 

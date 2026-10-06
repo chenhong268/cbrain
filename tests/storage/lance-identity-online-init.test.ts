@@ -235,3 +235,174 @@ describe("#545 R1 — model digest at the initialization boundary", () => {
     expect(readIndexIdentity(lancePath)?.modelDigest).toBeUndefined();
   });
 });
+
+/**
+ * #550: the query path may only see the identity of a connection that already
+ * passed the normal verification. These tests go through the manager itself and
+ * never call the snapshot helper directly.
+ */
+describe("#550 — the identity snapshot the query path reads", () => {
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), "cbrain-550-"));
+    originalFetch = globalThis.fetch;
+    installFakeModelServer();
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  test("exposes the identity of a live-verified connection and hands out a copy", async () => {
+    const lancePath = lanceDir("lance-verified");
+    const live = () => resolveOllamaModelDigest(UNREACHABLE, MODEL);
+    const seed = new LanceDBManager({ identity: identity(), resolveModelDigest: live });
+    await seed.connect(lancePath);
+    await seed.addChunks([chunk("entities/a", 0, 1)]);
+    await seed.close();
+
+    const manager = new LanceDBManager({ identity: identity(), resolveModelDigest: live });
+    await manager.connect(lancePath);
+    try {
+      const snapshot = manager.vectorIdentitySnapshot();
+      expect(snapshot).toEqual({
+        provider: "ollama",
+        model: MODEL,
+        dimensions: DIMS,
+        documentEncoding: 1,
+        modelDigest: "digest-current",
+      });
+
+      // The caller gets a copy: rewriting it cannot change what the manager
+      // verifies against on the next call.
+      const mutable = snapshot as { dimensions: number; model: string; modelDigest?: string };
+      mutable.dimensions = 2048;
+      mutable.model = "qwen3-embedding:4b";
+      mutable.modelDigest = "d".repeat(64);
+      const second = manager.vectorIdentitySnapshot();
+      expect(second).not.toBe(snapshot);
+      expect(second).toEqual({
+        provider: "ollama",
+        model: MODEL,
+        dimensions: DIMS,
+        documentEncoding: 1,
+        modelDigest: "digest-current",
+      });
+    } finally {
+      await manager.close();
+    }
+  });
+
+  test("reports nothing before a connection and after the handle is closed", async () => {
+    const lancePath = lanceDir("lance-lifecycle");
+    const live = () => resolveOllamaModelDigest(UNREACHABLE, MODEL);
+    const seed = new LanceDBManager({ identity: identity(), resolveModelDigest: live });
+    await seed.connect(lancePath);
+    await seed.addChunks([chunk("entities/a", 0, 1)]);
+    await seed.close();
+
+    const manager = new LanceDBManager({ identity: identity(), resolveModelDigest: live });
+    expect(manager.vectorIdentitySnapshot()).toBeNull();
+
+    await manager.connect(lancePath);
+    expect(manager.vectorIdentitySnapshot()).not.toBeNull();
+
+    await manager.close();
+    expect(manager.vectorIdentitySnapshot()).toBeNull();
+  });
+
+  test("reports nothing when the connection was refused", async () => {
+    const lancePath = lanceDir("lance-refused");
+    const first = new LanceDBManager({ identity: identity({ modelDigest: "digest-old" }) });
+    await first.connect(lancePath);
+    await first.addChunks([chunk("entities/a", 0, 1)]);
+    await first.close();
+
+    const refused = new LanceDBManager({ identity: identity({ modelDigest: "digest-current" }) });
+    await expect(refused.connect(lancePath)).rejects.toThrow(/LANCE_IDENTITY_MISMATCH/);
+    expect(refused.vectorIdentitySnapshot()).toBeNull();
+    await refused.close();
+  });
+
+  test("reports nothing for an index that carries no resolved identity", async () => {
+    const empty = new LanceDBManager({});
+    await empty.connect(lanceDir("lance-empty"));
+    expect(empty.vectorIdentitySnapshot()).toBeNull();
+    await empty.close();
+
+    const deterministic = createDeps({
+      vaultPath: join(root, "vault"),
+      dbPath: join(root, "snapshot.sqlite"),
+      lancePath: lanceDir("lance-deterministic-snapshot"),
+      runtimePath: join(root, "runtime"),
+      embedding: { provider: "deterministic" },
+    }, true);
+    try {
+      await deterministic.lance.connect(join(root, "lance-deterministic-snapshot"));
+      await deterministic.lance.addChunks([{ pageSlug: "entities/a", chunkIndex: 0, content: "alpha", vector: vector(1, 2048) }]);
+      // A recorded provider without a model digest is not a verified identity.
+      expect(deterministic.lance.vectorIdentitySnapshot()).toBeNull();
+    } finally {
+      await deterministic.lance.close();
+      deterministic.db.close();
+    }
+  });
+
+  test("refuses a stored identity that no configured model confirmed", async () => {
+    const lancePath = lanceDir("lance-unconfigured");
+    const live = () => resolveOllamaModelDigest(UNREACHABLE, MODEL);
+    const seed = new LanceDBManager({ identity: identity(), resolveModelDigest: live });
+    await seed.connect(lancePath);
+    await seed.addChunks([chunk("entities/a", 0, 1)]);
+    await seed.close();
+
+    // No configured identity means the connection only compared schemas, so the
+    // stored Qwen identity is a claim the query path must not read.
+    const unconfigured = new LanceDBManager({});
+    await unconfigured.connect(lancePath);
+    expect(readIndexIdentity(lancePath)?.modelDigest).toBe("digest-current");
+    expect(unconfigured.vectorIdentitySnapshot()).toBeNull();
+    await unconfigured.close();
+  });
+
+  test("refuses a static digest that no live resolver confirmed", async () => {
+    const lancePath = lanceDir("lance-static");
+    const live = () => resolveOllamaModelDigest(UNREACHABLE, MODEL);
+    const seed = new LanceDBManager({ identity: identity(), resolveModelDigest: live });
+    await seed.connect(lancePath);
+    await seed.addChunks([chunk("entities/a", 0, 1)]);
+    await seed.close();
+
+    // A digest copied from the config is a claim, not a confirmation.
+    const staticDigest = new LanceDBManager({ identity: identity({ modelDigest: "digest-current" }) });
+    await staticDigest.connect(lancePath);
+    expect(staticDigest.vectorIdentitySnapshot()).toBeNull();
+    await staticDigest.close();
+  });
+
+  test("revokes the snapshot for the whole reconnect, including a refused one", async () => {
+    const lancePath = lanceDir("lance-reconnect");
+    const live = () => resolveOllamaModelDigest(UNREACHABLE, MODEL);
+    const seed = new LanceDBManager({ identity: identity(), resolveModelDigest: live });
+    await seed.connect(lancePath);
+    await seed.addChunks([chunk("entities/a", 0, 1)]);
+    await seed.close();
+
+    const manager = new LanceDBManager({ identity: identity(), resolveModelDigest: live });
+    await manager.connect(lancePath);
+    expect(manager.vectorIdentitySnapshot()).not.toBeNull();
+
+    // The second connect revokes the snapshot before its first await, so the
+    // caller can never read the previous connection's identity.
+    const pending = manager.connect(lancePath);
+    expect(manager.vectorIdentitySnapshot()).toBeNull();
+    await pending;
+    expect(manager.vectorIdentitySnapshot()).not.toBeNull();
+
+    // A refused reconnect keeps it revoked.
+    tagsResponse.digest = "digest-drifted";
+    await expect(manager.connect(lancePath)).rejects.toThrow(/LANCE_IDENTITY_MISMATCH/);
+    expect(manager.vectorIdentitySnapshot()).toBeNull();
+    await manager.close();
+  });
+});

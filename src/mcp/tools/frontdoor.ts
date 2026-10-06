@@ -32,6 +32,8 @@ import {
   filterContentFtsFallbackCandidates,
   findKeywordCauseEvidence,
   isClosedKeywordCauseQuery,
+  isQwenContentFallbackIdentity,
+  selectQwenContentFallbackCandidate,
   type ContentCandidateAdmissionOptions,
 } from "../../core/retrieval/content-relevance.js";
 import { applyPersonalCurrentStateGuard } from "../../core/retrieval/personal-current-state-guard.js";
@@ -459,6 +461,21 @@ async function runContentRecall(
         results = verified.results;
         verificationIncomplete = verified.incomplete;
       }
+    }
+    // #550 — last resort, and only for the measured local Qwen identity. The
+    // guards keep the existing limits in force: an explicit-unknown cue never
+    // reaches this block, birthday and report requests are excluded, and a
+    // closed cause request still has to pass keepCertifiedCause below. It reuses
+    // the original candidates and adds no search, embedding, LLM or disk call.
+    if (
+      results.length === 0
+      && !birthdayRequested
+      && !reportRequested
+      && !causeRequested
+      && isQwenContentFallbackIdentity(ctx.lance.vectorIdentitySnapshot())
+    ) {
+      const fallback = selectQwenContentFallbackCandidate(candidates);
+      if (fallback) results = [fallback];
     }
   }
   results = keepSourceEvidence(results);

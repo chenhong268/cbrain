@@ -128,6 +128,8 @@ export class LanceDBManager {
   private readonly resolveModelDigest?: () => Promise<string | undefined>;
   /** True only when the index held no vector table at connect time (#545 R4). */
   private freshIndex = false;
+  /** #550 — true only while THIS connection passed identity and schema verification. */
+  private connectionVerified = false;
 
   constructor(options: LanceManagerOptions = {}) {
     const hours = options.compactRetentionHours ?? LanceDBManager.COMPACT_RETENTION_MS / 3600_000;
@@ -145,7 +147,23 @@ export class LanceDBManager {
     return this.dimensions;
   }
 
+  /**
+   * #550 — read-only identity snapshot of the verified current connection.
+   *
+   * Returns a copy, so a caller can never mutate the manager's identity state.
+   * Null while the connection is unverified (connecting, closed, refused) and
+   * null when the index has no recorded identity yet or that identity carries no
+   * digest. Reads no file and calls no model: the query path stays offline.
+   */
+  vectorIdentitySnapshot(): VectorIndexIdentity | null {
+    if (!this.connectionVerified || !this.db || !this.dbPath || !this.storedIdentity) return null;
+    if (!this.storedIdentity.modelDigest) return null;
+    return { ...this.storedIdentity };
+  }
+
   async connect(path: string): Promise<void> {
+    // #550 F2: revoke the snapshot before the first await — a reconnect never publishes the old identity.
+    this.connectionVerified = false;
     this.db = await lancedb.connect(path);
     this.dbPath = resolve(path);
     this.tables.clear();
@@ -156,6 +174,9 @@ export class LanceDBManager {
       // #545 F3/F2: resolve the digest for THIS connection — a kept value hides a swap on reopen.
       this.activeIdentity = await this.resolveActiveIdentity();
       await this.verifyIndexOnConnect();
+      // #550 F1: only a live digest from the configured resolver confirms the current model.
+      this.connectionVerified =
+        this.activeIdentity?.modelDigest !== undefined && this.resolveModelDigest !== undefined;
     } catch (e) {
       // #545 R3: a refused index must not leave a usable handle behind — cached tables keep working.
       this.resetConnectionState();
@@ -173,6 +194,7 @@ export class LanceDBManager {
     this.storedIdentity = null;
     this.identityCommitted = false;
     this.freshIndex = false;
+    this.connectionVerified = false;
   }
 
   /** #545 F2/F3: identity of this connection. A model whose digest the server will not report gets
@@ -623,5 +645,6 @@ export class LanceDBManager {
     this.tables.clear();
     this.db = null;
     this.dbPath = null;
+    this.connectionVerified = false;
   }
 }

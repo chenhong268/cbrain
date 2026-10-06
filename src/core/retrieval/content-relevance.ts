@@ -1,4 +1,5 @@
 import type { SearchResult } from "./search.js";
+import type { VectorIndexIdentity } from "../../storage/lance-identity.js";
 import {
   CONTENT_LEXICAL_MIN_COVERAGE,
   CONTENT_VECTOR_EPSILON,
@@ -157,6 +158,63 @@ export function filterContentFtsFallbackCandidates(
     && (!anchoredRunnerUp || anchoredTop.score >= anchoredRunnerUp.score * FTS_FALLBACK_DOMINANCE_RATIO)
   ) return keepCertifiedCauseEvidence(query, [anchoredTop], options);
   return [];
+}
+
+/**
+ * #550 — narrow content fallback for the measured local Qwen model. The values
+ * are fixed by the contract: there is no configuration surface for them.
+ */
+export const QWEN_CONTENT_FALLBACK_MIN_COSINE = 0.6;
+/** Minimum top-1 lead over the runner-up page, so a near tie returns nothing. */
+export const QWEN_CONTENT_FALLBACK_MIN_MARGIN_RATIO = 1.05;
+const QWEN_CONTENT_FALLBACK_IDENTITY = {
+  provider: "ollama",
+  model: "qwen3-embedding:0.6b",
+  dimensions: 1024,
+  documentEncoding: 1,
+  modelDigest: "ac6da0dfba84a81fdbfbaf330198c33cd77c4cdfc53e8bc50eb581914a15621d",
+} as const;
+
+/**
+ * #550 — the whitelist covers exactly the model measured for this fallback.
+ * Every field must match. A dimension-only match, an instance name, an
+ * unverified configuration or a private field must never enable it, and the
+ * caller must pass a snapshot taken from a verified connection. A different
+ * model needs its own measurement before it may be added here.
+ */
+export function isQwenContentFallbackIdentity(identity: VectorIndexIdentity | null): boolean {
+  if (!identity) return false;
+  return identity.provider === QWEN_CONTENT_FALLBACK_IDENTITY.provider
+    && identity.model === QWEN_CONTENT_FALLBACK_IDENTITY.model
+    && identity.dimensions === QWEN_CONTENT_FALLBACK_IDENTITY.dimensions
+    && identity.documentEncoding === QWEN_CONTENT_FALLBACK_IDENTITY.documentEncoding
+    && identity.modelDigest === QWEN_CONTENT_FALLBACK_IDENTITY.modelDigest;
+}
+
+/**
+ * #550 — last resort after every existing admission and rescue stayed empty.
+ *
+ * Only the original query's captured page cosine counts: fused rank, derived
+ * queries and graph rank never substitute for it. Duplicate slugs collapse to
+ * the page's best valid cosine, so a repeated page cannot invent a margin.
+ * Fewer than two valid pages returns nothing, because a lone page has no
+ * competitor and its absolute score alone was already measured as unreliable.
+ */
+export function selectQwenContentFallbackCandidate(
+  results: readonly SearchResult[],
+): SearchResult | null {
+  const bestBySlug = new Map<string, { result: SearchResult; cosine: number }>();
+  for (const result of results) {
+    const cosine = getRetrievalSupport(result).vector?.original?.vectorCosineSimilarity;
+    if (typeof cosine !== "number" || !Number.isFinite(cosine) || cosine < -1 || cosine > 1) continue;
+    const best = bestBySlug.get(result.slug);
+    if (!best || cosine > best.cosine) bestBySlug.set(result.slug, { result, cosine });
+  }
+  const [top, runnerUp] = [...bestBySlug.values()].sort((left, right) => right.cosine - left.cosine);
+  if (!top || !runnerUp) return null;
+  if (top.cosine < QWEN_CONTENT_FALLBACK_MIN_COSINE) return null;
+  if (top.cosine < runnerUp.cosine * QWEN_CONTENT_FALLBACK_MIN_MARGIN_RATIO) return null;
+  return top.result;
 }
 
 /**
