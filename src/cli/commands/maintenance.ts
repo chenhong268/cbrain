@@ -6,10 +6,12 @@ import type { EmbeddingProvider } from "../../embedding/provider.js";
 import { LanceDBManager } from "../../storage/lancedb.js";
 import { checkLanceIntegrity } from "../../storage/lance-integrity.js";
 import { ZhipuEmbeddingProvider } from "../../embedding/zhipu.js";
-import { OllamaEmbeddingProvider, OLLAMA_DEFAULT_MODEL } from "../../embedding/ollama.js";
+import { OllamaEmbeddingProvider, OLLAMA_DEFAULT_MODEL, resolveOllamaModelDigest } from "../../embedding/ollama.js";
 import { ZhipuLLMProvider } from "../../llm/zhipu.js";
 import { DeepSeekLLMProvider } from "../../llm/deepseek.js";
-import { loadConfig, loadConfigWithPath, createDeps, resolveRuntimePath } from "../context.js";
+import { loadConfig, loadConfigWithPath, createDeps, resolveRuntimePath, resolveVectorIdentity } from "../context.js";
+import type { CBrainConfig } from "../context.js";
+import type { VectorIndexIdentity } from "../../storage/lance-identity.js";
 import { resolveTrustedVaultBoundary } from "../../core/maintenance/misplaced-vault-artifacts.js";
 import {
   atomicSlugChange,
@@ -45,6 +47,8 @@ export async function handleReindexVectors(
   db: CBrainDB,
   embedding: EmbeddingProvider,
   lockProbe: LockProbe,
+  /** #545: identity recorded in the rebuilt index. Omitted by legacy callers. */
+  identity?: VectorIndexIdentity,
   log: (msg: string) => void = console.log,
   logError: (msg: string) => void = console.error,
 ): Promise<number> {
@@ -66,11 +70,18 @@ export async function handleReindexVectors(
 
     const { rebuildLanceIndex } = await import("../../storage/lance-rebuild.js");
     const report = await rebuildLanceIndex(lancePath, db, embedding, undefined, {
+      identity,
       onProgress: ({ phase, processed, total, batch, batches }) => {
         log(`Progress: ${phase} ${processed}/${total} (batch ${batch}/${batches})`);
       },
     });
-    log(`Rebuilt:  ${report.chunksRebuilt} pages chunks, ${report.insightsRebuilt} insights`);
+    if (report.noOp) {
+      // #545: a kept-as-is live index is not a model migration. Saying
+      // "Rebuilt" here would report a successful switch that never happened.
+      log("No-op: SQLite 无 chunks/insights 数据 — 保留现有索引及其模型标识，未执行模型迁移。");
+    } else {
+      log(`Rebuilt:  ${report.chunksRebuilt} pages chunks, ${report.insightsRebuilt} insights`);
+    }
     if (report.backupPath) {
       log(`Backup:   ${report.backupPath}`);
     }
@@ -86,6 +97,28 @@ export async function handleReindexVectors(
     db.close();
   }
   return exitCode;
+}
+
+/**
+ * #545: identity recorded when a full vector rebuild replaces the index.
+ *
+ * This is the only place that resolves the local model digest — it runs at a
+ * rebuild boundary, never on a normal read, so a search does not touch the
+ * model management API. An unreachable model server yields an identity without
+ * a digest: recorded as "not resolved", never guessed.
+ */
+async function resolveRebuildIdentity(
+  config: CBrainConfig,
+  embedding: EmbeddingProvider | undefined,
+): Promise<VectorIndexIdentity | undefined> {
+  const identity = resolveVectorIdentity(config, embedding);
+  if (!identity || identity.provider !== "ollama") return identity;
+  const digest = await resolveOllamaModelDigest(config.embedding.baseUrl, identity.model);
+  if (!digest) {
+    console.log("Note: model digest unavailable (model server unreachable) — index identity recorded without a digest.");
+    return identity;
+  }
+  return { ...identity, modelDigest: digest };
 }
 
 /**
@@ -408,7 +441,10 @@ export function register(program: Command) {
       // a running serve, so refuse while a writer is active.
       if (mode.mode === "reindex-vectors") {
         console.log("Reindexing vectors (atomic staging rebuild)...");
-        process.exitCode = await handleReindexVectors(config.lancePath, deps.db, deps.embedding, lockProbe);
+        const identity = await resolveRebuildIdentity(config, deps.embedding);
+        process.exitCode = await handleReindexVectors(
+          config.lancePath, deps.db, deps.embedding, lockProbe, identity,
+        );
         return;
       }
 

@@ -1,8 +1,16 @@
 import * as lancedb from "@lancedb/lancedb";
-import { Field, FixedSizeList, Float32, Int32, Schema, Utf8 } from "apache-arrow";
 import type { Data } from "@lancedb/lancedb";
 import { readdir, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import {
+  assertIndexIdentity,
+  readIndexIdentity,
+  vectorColumnDimensions,
+  vectorSchemas,
+  writeIndexIdentity,
+  VectorIdentityError,
+} from "./lance-identity.js";
+import type { VectorIndexIdentity, VectorSchemaSet } from "./lance-identity.js";
 
 export interface CompactReport {
   tables: string[];
@@ -48,28 +56,26 @@ export interface InsightSearchResult {
   _distance?: number;
 }
 
+/**
+ * Legacy width used only when a caller supplies no index identity (offline
+ * probes, unit tests). Live paths derive the width from the embedding provider
+ * via `vectorSchemas()` — see #545.
+ */
 export const VECTOR_DIMENSIONS = 2048;
 
-export const CHUNKS_SCHEMA = new Schema([
-  new Field("pageSlug", new Utf8(), false),
-  new Field("chunkIndex", new Int32(), false),
-  new Field("content", new Utf8(), false),
-  new Field(
-    "vector",
-    new FixedSizeList(VECTOR_DIMENSIONS, new Field("item", new Float32(), false)),
-    false
-  ),
-]);
+/** Tables owned by the vector index. */
+export type LanceTableName = "chunks" | "insights";
 
-export const INSIGHTS_SCHEMA = new Schema([
-  new Field("id", new Int32(), false),
-  new Field("content", new Utf8(), false),
-  new Field(
-    "vector",
-    new FixedSizeList(VECTOR_DIMENSIONS, new Field("item", new Float32(), false)),
-    false
-  ),
-]);
+/** Options for a manager handle. */
+export interface LanceManagerOptions {
+  compactRetentionHours?: number;
+  /**
+   * Identity of the embedding model this handle is allowed to use. Omit only
+   * for offline read-only callers (fsck probe, compact, unit tests); omitting
+   * disables the model comparison but never the schema consistency check.
+   */
+  identity?: VectorIndexIdentity;
+}
 
 /**
  * Raised when a strict open is requested for a table that does not exist.
@@ -113,35 +119,112 @@ export class LanceDBManager {
   private dbPath: string | null = null;
   private readonly compactRetentionMs: number;
   private tables: Map<string, lancedb.Table> = new Map();
+  /** Expected model identity; null means "no provider context, schema check only". */
+  private readonly expectedIdentity: VectorIndexIdentity | null;
+  private storedIdentity: VectorIndexIdentity | null = null;
+  private dimensions: number;
+  private schemas: VectorSchemaSet;
+  private identityCommitted = false;
 
-  constructor(options: { compactRetentionHours?: number } = {}) {
+  constructor(options: LanceManagerOptions = {}) {
     const hours = options.compactRetentionHours ?? LanceDBManager.COMPACT_RETENTION_MS / 3600_000;
     if (!Number.isFinite(hours) || hours < 1 || hours > 168) {
       throw new Error("maintenance.compactRetentionHours must be between 1 and 168 hours");
     }
     this.compactRetentionMs = hours * 3600_000;
+    this.expectedIdentity = options.identity ?? null;
+    this.dimensions = this.expectedIdentity?.dimensions ?? VECTOR_DIMENSIONS;
+    this.schemas = vectorSchemas(this.dimensions);
+  }
+
+  /** Vector width in use for this handle (from identity, else legacy default). */
+  get vectorDimensions(): number {
+    return this.dimensions;
   }
 
   async connect(path: string): Promise<void> {
     this.db = await lancedb.connect(path);
     this.dbPath = resolve(path);
+    this.tables.clear();
+    this.tableInits.clear();
+    await this.verifyIndexOnConnect();
+  }
+
+  /**
+   * #545: verify the stored identity and the on-disk schema before any read or
+   * write. Fails closed on mismatch; never relabels or repairs an index.
+   */
+  private async verifyIndexOnConnect(): Promise<void> {
+    if (!this.db || !this.dbPath) return;
+    const tableNames = await this.db.tableNames();
+    this.storedIdentity = readIndexIdentity(this.dbPath);
+
+    if (tableNames.length === 0) {
+      if (this.storedIdentity) {
+        throw new VectorIdentityError(
+          `LANCE_IDENTITY_ORPHANED: ${this.dbPath} has an index identity but no tables. `
+          + "Recovery: stop serve/watcher → cbrain sync --reindex-vectors → restart.",
+        );
+      }
+      return;
+    }
+
+    // Every existing vector table must agree on the width; a mixed index means a
+    // partially applied migration, which must never be read as if it were whole.
+    let width: number | null = null;
+    for (const name of ["chunks", "insights"] as const) {
+      if (!tableNames.includes(name)) continue;
+      const table = await this.db.openTable(name);
+      this.tables.set(name, table);
+      const dims = vectorColumnDimensions(await table.schema());
+      if (dims === null) {
+        throw new VectorIdentityError(
+          `LANCE_IDENTITY_SCHEMA_MISMATCH: table "${name}" in ${this.dbPath} has no fixed-size vector column.`
+          + " Recovery: stop serve/watcher → cbrain sync --reindex-vectors → restart.",
+        );
+      }
+      if (width === null) width = dims;
+      else if (width !== dims) {
+        throw new VectorIdentityError(
+          `LANCE_IDENTITY_MIXED_SCHEMA: ${this.dbPath} mixes ${width}d and ${dims}d vector tables ("${name}").`
+          + " A partially applied migration must be rebuilt. Recovery: stop serve/watcher → cbrain sync --reindex-vectors → restart.",
+        );
+      }
+    }
+
+    assertIndexIdentity({
+      indexPath: this.dbPath,
+      expected: this.expectedIdentity,
+      stored: this.storedIdentity,
+      schemaDimensions: width,
+    });
+
+    // Adopt the verified width so creation of a missing sibling table cannot
+    // introduce a width that contradicts the index already on disk.
+    this.adoptDimensions(this.expectedIdentity?.dimensions ?? this.storedIdentity?.dimensions ?? VECTOR_DIMENSIONS);
+  }
+
+  private adoptDimensions(dimensions: number): void {
+    if (dimensions === this.dimensions) return;
+    this.dimensions = dimensions;
+    this.schemas = vectorSchemas(dimensions);
   }
 
   private tableInits = new Map<string, Promise<lancedb.Table>>();
 
-  private async getOrCreateTable(name: string, schema: Schema): Promise<lancedb.Table> {
+  private async getOrCreateTable(name: LanceTableName): Promise<lancedb.Table> {
     const cached = this.tables.get(name);
     if (cached) return cached;
 
     let pending = this.tableInits.get(name);
     if (!pending) {
-      pending = this.initTable(name, schema);
+      pending = this.initTable(name);
       this.tableInits.set(name, pending);
     }
     return pending;
   }
 
-  private async initTable(name: string, schema: Schema): Promise<lancedb.Table> {
+  private async initTable(name: LanceTableName): Promise<lancedb.Table> {
     if (!this.db) throw new Error("LanceDB not connected. Call connect() first.");
 
     const tableNames = await this.db.tableNames();
@@ -149,10 +232,23 @@ export class LanceDBManager {
     if (tableNames.includes(name)) {
       table = await this.db.openTable(name);
     } else {
-      table = await this.db.createTable(name, [], { schema, mode: "create" });
+      table = await this.db.createTable(name, [], { schema: this.schemas[name], mode: "create" });
+      this.commitIdentityOnCreate();
     }
     this.tables.set(name, table);
     return table;
+  }
+
+  /**
+   * A newly created index records the model that built it. Only called on the
+   * creation path of a directory that held no tables, and only when this handle
+   * knows which provider is configured.
+   */
+  private commitIdentityOnCreate(): void {
+    if (this.identityCommitted || !this.expectedIdentity || this.storedIdentity || !this.dbPath) return;
+    writeIndexIdentity(this.dbPath, this.expectedIdentity);
+    this.storedIdentity = this.expectedIdentity;
+    this.identityCommitted = true;
   }
 
   // ─── Warmup ────────────────────────────────────────────────────
@@ -161,18 +257,18 @@ export class LanceDBManager {
     const start = Date.now();
     const loaded: string[] = [];
 
-    const chunksTable = await this.getOrCreateTable("chunks", CHUNKS_SCHEMA);
+    const chunksTable = await this.getOrCreateTable("chunks");
     loaded.push("chunks");
 
     try {
-      await this.getOrCreateTable("insights", INSIGHTS_SCHEMA);
+      await this.getOrCreateTable("insights");
       loaded.push("insights");
     } catch {
       // insights table may not exist yet — not critical
     }
 
     try {
-      await chunksTable.search(new Float32Array(VECTOR_DIMENSIONS)).limit(1).toArray();
+      await chunksTable.search(new Float32Array(this.dimensions)).limit(1).toArray();
     } catch {
       // Empty table — search fails, that's fine
     }
@@ -184,13 +280,13 @@ export class LanceDBManager {
 
   async addChunks(chunks: ChunkData[]): Promise<void> {
     if (chunks.length === 0) return;
-    const table = await this.getOrCreateTable("chunks", CHUNKS_SCHEMA);
+    const table = await this.getOrCreateTable("chunks");
 
     const records: Data = chunks.map((chunk) => ({
       pageSlug: chunk.pageSlug,
       chunkIndex: chunk.chunkIndex,
       content: chunk.content,
-      vector: chunk.vector ?? new Float32Array(VECTOR_DIMENSIONS),
+      vector: chunk.vector ?? new Float32Array(this.dimensions),
     }));
 
     await table.add(records);
@@ -201,7 +297,7 @@ export class LanceDBManager {
     limit: number = 10,
     options?: LanceSearchOptions,
   ): Promise<SearchResult[]> {
-    const table = await this.getOrCreateTable("chunks", CHUNKS_SCHEMA);
+    const table = await this.getOrCreateTable("chunks");
     const columns = ["pageSlug", "chunkIndex", "content", "_distance"];
     if (options?.includeVector) columns.push("vector");
 
@@ -225,13 +321,13 @@ export class LanceDBManager {
   }
 
   async deleteByPageSlug(pageSlug: string): Promise<void> {
-    const table = await this.getOrCreateTable("chunks", CHUNKS_SCHEMA);
+    const table = await this.getOrCreateTable("chunks");
     await table.delete(`pageSlug = '${pageSlug.replace(/'/g, "''")}'`);
   }
 
   async getIndexedPageSlugs(): Promise<string[]> {
     try {
-      const table = await this.getOrCreateTable("chunks", CHUNKS_SCHEMA);
+      const table = await this.getOrCreateTable("chunks");
       const rows = await table.query().select(["pageSlug"]).toArray();
       return [...new Set(rows.map((r: Record<string, unknown>) => r.pageSlug as string))];
     } catch {
@@ -240,13 +336,13 @@ export class LanceDBManager {
   }
 
   async deleteRawChunksByPageSlug(pageSlug: string): Promise<void> {
-    const table = await this.getOrCreateTable("chunks", CHUNKS_SCHEMA);
+    const table = await this.getOrCreateTable("chunks");
     const escaped = pageSlug.replace(/'/g, "''");
     await table.delete(`pageSlug = '${escaped}' AND chunkIndex >= 0`);
   }
 
   async deleteL1VectorByPageSlug(pageSlug: string): Promise<void> {
-    const table = await this.getOrCreateTable("chunks", CHUNKS_SCHEMA);
+    const table = await this.getOrCreateTable("chunks");
     const escaped = pageSlug.replace(/'/g, "''");
     await table.delete(`pageSlug = '${escaped}' AND chunkIndex = -1`);
   }
@@ -273,7 +369,9 @@ export class LanceDBManager {
     if (!tableNames.includes("chunks")) {
       throw new LanceTableMissingError("chunks");
     }
+    // connected ⇒ identity already verified; re-verify the width defensively.
     const table = await this.db.openTable("chunks");
+    await this.assertStoredWidth(table);
     this.tables.set("chunks", table);
     return table;
   }
@@ -348,16 +446,16 @@ export class LanceDBManager {
   // ─── Insights table ────────────────────────────────────────────
 
   async addInsightVector(data: InsightVectorData): Promise<void> {
-    const table = await this.getOrCreateTable("insights", INSIGHTS_SCHEMA);
+    const table = await this.getOrCreateTable("insights");
     await table.add([{
       id: data.id,
       content: data.content,
-      vector: data.vector ?? new Float32Array(VECTOR_DIMENSIONS),
+      vector: data.vector ?? new Float32Array(this.dimensions),
     }]);
   }
 
   async searchInsights(queryVector: number[] | Float32Array, limit: number = 10): Promise<InsightSearchResult[]> {
-    const table = await this.getOrCreateTable("insights", INSIGHTS_SCHEMA);
+    const table = await this.getOrCreateTable("insights");
 
     const query = table
       .search(queryVector)
@@ -374,7 +472,7 @@ export class LanceDBManager {
   }
 
   async deleteInsightVector(id: number): Promise<void> {
-    const table = await this.getOrCreateTable("insights", INSIGHTS_SCHEMA);
+    const table = await this.getOrCreateTable("insights");
     await table.delete(`id = ${id}`);
   }
 
@@ -462,6 +560,17 @@ export class LanceDBManager {
   }
 
   // ─── Lifecycle ─────────────────────────────────────────────────
+
+  /** Reject a table whose width contradicts the identity already accepted. */
+  private async assertStoredWidth(table: lancedb.Table): Promise<void> {
+    const dims = vectorColumnDimensions(await table.schema());
+    if (dims !== null && dims !== this.dimensions) {
+      throw new VectorIdentityError(
+        `LANCE_IDENTITY_SCHEMA_MISMATCH: table width ${dims}d contradicts the verified index width ${this.dimensions}d.`
+        + " Recovery: stop serve/watcher → cbrain sync --reindex-vectors → restart.",
+      );
+    }
+  }
 
   async close(): Promise<void> {
     for (const table of this.tables.values()) {

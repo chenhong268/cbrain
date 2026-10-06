@@ -21,7 +21,8 @@ import * as lancedb from "@lancedb/lancedb";
 import type { CBrainDB } from "./sqlite.js";
 import type { EmbeddingProvider } from "../embedding/provider.js";
 import type { EmbeddingResult } from "../embedding/provider.js";
-import { CHUNKS_SCHEMA, INSIGHTS_SCHEMA } from "./lancedb.js";
+import { vectorIndexIdentity, vectorSchemas, writeIndexIdentity, DOCUMENT_ENCODING_VERSION } from "./lance-identity.js";
+import type { VectorIndexIdentity } from "./lance-identity.js";
 
 // ── Types ───────────────────────────────────────────────────
 
@@ -35,6 +36,12 @@ export interface RebuildResult {
   readonly errorDetails: readonly string[];
   /** Path to backup of old live directory, or null */
   readonly backupPath: string | null;
+  /**
+   * #545: true when nothing was rebuilt because SQLite held no source data.
+   * The live index (and its identity) were kept as-is — a no-op is NOT a model
+   * migration and must never be reported as one.
+   */
+  readonly noOp: boolean;
 }
 
 /** Filesystem operations — injectable for testing */
@@ -61,6 +68,12 @@ export interface RebuildOptions {
   readonly chunkBatchSize?: number;
   readonly insightBatchSize?: number;
   readonly onProgress?: (progress: RebuildProgress) => void;
+  /**
+   * #545: identity of the embedding model producing these vectors. Written into
+   * the staging directory after verification, so the new index always carries
+   * the model that built it (and a failed rebuild changes nothing).
+   */
+  readonly identity?: VectorIndexIdentity;
 }
 
 export const DEFAULT_REBUILD_BATCH_SIZE = 256;
@@ -85,6 +98,7 @@ async function embedInBatches<T>(input: {
   content: (row: T) => string;
   embedding: EmbeddingProvider;
   batchSize: number;
+  dimensions: number;
   phase: RebuildProgressPhase;
   onProgress?: RebuildOptions["onProgress"];
 }): Promise<EmbeddingResult[]> {
@@ -95,6 +109,15 @@ async function embedInBatches<T>(input: {
     const embedded = await input.embedding.embedBatch(rows.map(input.content));
     if (embedded.length !== rows.length) {
       throw new Error(`EMBEDDING_COUNT_MISMATCH: ${input.phase} batch returned ${embedded.length}, expected ${rows.length}`);
+    }
+    // #545: the staging schema is built from the provider's declared width, so a
+    // provider that returns another width must fail here, not write a bad row.
+    for (const result of embedded) {
+      if (result.embedding.length !== input.dimensions) {
+        throw new Error(
+          `EMBEDDING_DIMENSION_MISMATCH: ${input.phase} provider returned ${result.embedding.length}d, expected ${input.dimensions}d`,
+        );
+      }
     }
     out.push(...embedded);
     const batch = Math.floor(offset / input.batchSize) + 1;
@@ -131,6 +154,12 @@ export async function rebuildLanceIndex(
 ): Promise<RebuildResult> {
   const chunkBatchSize = normalizeBatchSize(options.chunkBatchSize, "chunkBatchSize");
   const insightBatchSize = normalizeBatchSize(options.insightBatchSize, "insightBatchSize");
+  // #545: the width comes from the provider that actually produces the vectors.
+  const dimensions = embedding.dimensions;
+  const schemas = vectorSchemas(dimensions);
+  const identity = options.identity
+    ? vectorIndexIdentity({ ...options.identity, dimensions, documentEncoding: DOCUMENT_ENCODING_VERSION })
+    : null;
   // ── 0. Read source data from SQLite ──
   // #269: rebuild BOTH L0 raw chunks (summary_level = 0) AND L1 summary chunks
   // (summary_level = 1, chunk_index = -1). Filtering to L0 only silently dropped
@@ -150,17 +179,20 @@ export async function rebuildLanceIndex(
   // ── No-op: empty SQLite ──
   if (!hasSqliteData) {
     if (liveExists) {
-      // Don't replace a working live index with empty staging
+      // Don't replace a working live index with empty staging. The live index
+      // keeps its own identity: this preserves an index, it does not migrate one.
       return {
         chunksRebuilt: 0, insightsRebuilt: 0, errors: 0,
-        errorDetails: [], backupPath: null,
+        errorDetails: [], backupPath: null, noOp: true,
       };
     }
-    // No data anywhere — create empty live
+    // No data anywhere — create an empty live directory. No identity is written:
+    // with no tables there is no index to describe yet. The identity is committed
+    // when the first table is created and by the first real rebuild.
     fs.mkdirSync(lancePath, { recursive: true });
     return {
       chunksRebuilt: 0, insightsRebuilt: 0, errors: 0,
-      errorDetails: [], backupPath: null,
+      errorDetails: [], backupPath: null, noOp: true,
     };
   }
 
@@ -180,6 +212,7 @@ export async function rebuildLanceIndex(
       content: (row) => row.content as string,
       embedding,
       batchSize: chunkBatchSize,
+      dimensions,
       phase: "chunks",
       onProgress: options.onProgress,
     });
@@ -192,7 +225,7 @@ export async function rebuildLanceIndex(
     const rebuiltPageCount = new Set(chunkRows.map((row) => row.page_slug as string)).size;
 
     if (allChunkData.length > 0) {
-      await stagingConn.createTable("chunks", allChunkData, { schema: CHUNKS_SCHEMA, mode: "create" });
+      await stagingConn.createTable("chunks", allChunkData, { schema: schemas.chunks, mode: "create" });
     }
 
     // ── 3. Build insights table ──
@@ -202,6 +235,7 @@ export async function rebuildLanceIndex(
         content: (row) => row.content as string,
         embedding,
         batchSize: insightBatchSize,
+        dimensions,
         phase: "insights",
         onProgress: options.onProgress,
       });
@@ -210,7 +244,7 @@ export async function rebuildLanceIndex(
         content: row.content as string,
         vector: new Float32Array(embedResults[i].embedding),
       }));
-      await stagingConn.createTable("insights", insightData, { schema: INSIGHTS_SCHEMA, mode: "create" });
+      await stagingConn.createTable("insights", insightData, { schema: schemas.insights, mode: "create" });
     }
 
     // ── 4. Verify staging matches SQLite exactly ──
@@ -268,6 +302,11 @@ export async function rebuildLanceIndex(
       }
     }
 
+    // #545: commit the model identity only after staging verified. It travels
+    // with the directory swap, so a failed build leaves the old index and its
+    // own identity in place.
+    if (identity) writeIndexIdentity(stagingPath, identity);
+
     // Close staging before filesystem operations
     stagingConn.close();
     stagingConn = null;
@@ -306,6 +345,7 @@ export async function rebuildLanceIndex(
       errors: 0,
       errorDetails: [],
       backupPath,
+      noOp: false,
   };
   } finally {
     // Always clean up: close staging conn + remove staging dir if it still exists

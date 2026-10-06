@@ -237,3 +237,38 @@ export class OllamaEmbeddingProvider implements EmbeddingProvider {
     }
   }
 }
+
+/**
+ * #545: resolve the local model digest from the Ollama model list.
+ *
+ * Called only at an index creation / rebuild boundary — never per query, so a
+ * normal search does not talk to the model management API. Returns `undefined`
+ * when the server is unreachable or reports no digest for the model: offline
+ * checks must not fail because the model server is down, and the identity is
+ * always written as "digest not resolved" rather than a guessed value.
+ */
+export async function resolveOllamaModelDigest(
+  baseUrl: string = DEFAULT_BASE_URL,
+  model: string = OLLAMA_DEFAULT_MODEL,
+  options?: { timeoutMs?: number; signal?: AbortSignal },
+): Promise<string | undefined> {
+  const url = `${baseUrl.replace(/\/+$/, "")}/api/tags`;
+  const controller = new AbortController();
+  const signal = options?.signal
+    ? AbortSignal.any([options.signal, controller.signal])
+    : controller.signal;
+  const timer = setTimeout(() => controller.abort(), options?.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+  try {
+    const response = await fetch(url, { headers: { Accept: "application/json" }, signal });
+    if (!response.ok) return undefined;
+    const json = (await response.json()) as {
+      models?: Array<{ name?: string; model?: string; digest?: string }>;
+    };
+    const match = (json.models ?? []).find((entry) => entry.name === model || entry.model === model);
+    return match?.digest && match.digest.length > 0 ? match.digest : undefined;
+  } catch {
+    return undefined;
+  } finally {
+    clearTimeout(timer);
+  }
+}

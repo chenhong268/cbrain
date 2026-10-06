@@ -2,7 +2,8 @@ import { setTimeout as delay } from "node:timers/promises";
 import type { EmbeddingProvider, EmbeddingResult, EmbeddingRequestOptions } from "./provider.js";
 
 const DEFAULT_BASE_URL = "https://open.bigmodel.cn/api/paas/v4";
-const MODEL = "embedding-3";
+/** Model id recorded in the vector index identity (#545). */
+export const ZHIPU_EMBEDDING_MODEL = "embedding-3";
 const DIMENSIONS = 2048;
 
 // Network resilience defaults for #270: abort hangs, retry transient faults.
@@ -104,7 +105,7 @@ export class ZhipuEmbeddingProvider implements EmbeddingProvider {
     callerSignal?: AbortSignal,
   ): Promise<ZhipuEmbeddingResponse> {
     const url = `${this.baseUrl}/embeddings`;
-    const body = JSON.stringify({ model: MODEL, input: batch });
+    const body = JSON.stringify({ model: ZHIPU_EMBEDDING_MODEL, input: batch });
 
     type ShardResult =
       | { ok: true; json: ZhipuEmbeddingResponse }

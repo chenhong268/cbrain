@@ -3,10 +3,12 @@ import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { CBrainDB } from "../storage/sqlite.js";
 import { LanceDBManager } from "../storage/lancedb.js";
-import { ZhipuEmbeddingProvider } from "../embedding/zhipu.js";
-import { OllamaEmbeddingProvider } from "../embedding/ollama.js";
-import { DeterministicEmbeddingProvider } from "../embedding/deterministic.js";
+import { ZhipuEmbeddingProvider, ZHIPU_EMBEDDING_MODEL } from "../embedding/zhipu.js";
+import { OllamaEmbeddingProvider, OLLAMA_DEFAULT_MODEL } from "../embedding/ollama.js";
+import { DeterministicEmbeddingProvider, DETERMINISTIC_EMBEDDING_MODEL } from "../embedding/deterministic.js";
 import type { EmbeddingProvider } from "../embedding/provider.js";
+import { vectorIndexIdentity } from "../storage/lance-identity.js";
+import type { VectorIndexIdentity } from "../storage/lance-identity.js";
 import { ZhipuLLMProvider } from "../llm/zhipu.js";
 import type { CBrainDeps } from "../mcp/server.js";
 import { resolveToolProfile } from "../mcp/tool-profiles.js";
@@ -14,6 +16,32 @@ import type { NerMode } from "../core/ingestion/ner-write-path.js";
 import type { TrustedVaultBoundary } from "../core/maintenance/misplaced-vault-artifacts.js";
 
 const CONFIG_FILE = "cbrain.json";
+
+/**
+ * #545: identity of the embedding model the current config selects.
+ *
+ * Dimensions come from the provider instance, so each width is declared exactly
+ * once. The model digest is deliberately NOT resolved here: this runs on every
+ * command, and a read path must not talk to the model management API. The
+ * rebuild boundary resolves it — see `resolveRebuildIdentity` in
+ * `commands/maintenance.ts`.
+ *
+ * Returns undefined when no provider exists (requireEmbedding=false without a
+ * credential): such a caller has no model, so it gets no identity check.
+ */
+export function resolveVectorIdentity(
+  config: CBrainConfig,
+  embedding: EmbeddingProvider | undefined,
+): VectorIndexIdentity | undefined {
+  if (!embedding) return undefined;
+  const provider = config.embedding.provider ?? "zhipu";
+  const model = provider === "ollama"
+    ? config.embedding.model ?? OLLAMA_DEFAULT_MODEL
+    : provider === "deterministic"
+      ? DETERMINISTIC_EMBEDDING_MODEL
+      : ZHIPU_EMBEDDING_MODEL;
+  return vectorIndexIdentity({ provider, model, dimensions: embedding.dimensions });
+}
 
 export interface CBrainConfig {
   vaultPath: string;
@@ -200,7 +228,6 @@ export function createDeps(
       `Unknown embedding.provider "${embeddingProvider}" (expected "zhipu", "ollama", or "deterministic").`,
     );
   }
-  const lance = new LanceDBManager(config.maintenance);
   const db = new CBrainDB(config.dbPath);
   const isDeterministic = embeddingProvider === "deterministic";
   const isOllama = embeddingProvider === "ollama";
@@ -219,6 +246,14 @@ export function createDeps(
       : apiKey
         ? new ZhipuEmbeddingProvider(apiKey, config.embedding.baseUrl)
         : (undefined as unknown as EmbeddingProvider);
+
+  // #545: the vector index records the model that built it, and the manager
+  // verifies that identity before any read or write. A config change therefore
+  // cannot silently mix two vector spaces that share a width.
+  const lance = new LanceDBManager({
+    ...config.maintenance,
+    identity: resolveVectorIdentity(config, embedding),
+  });
 
   // #544: NER/reflect credentials stay a separate contract. Removing the
   // embedding cloud key must not switch off an already-configured LLM.

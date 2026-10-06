@@ -19,6 +19,8 @@ import type { EmbeddingProvider, EmbeddingResult } from "./provider.js";
  * agree and lance cosine recall hits. Keyword (FTS) recall is unaffected.
  */
 const DIMENSIONS = 2048;
+/** Model id recorded in the vector index identity (#545). */
+export const DETERMINISTIC_EMBEDDING_MODEL = "deterministic-fixed-v1";
 const FIXED_VECTOR = Array.from({ length: DIMENSIONS }, (_, i) =>
   Math.sin(i * 0.001) * 0.5,
 );
