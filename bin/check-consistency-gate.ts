@@ -35,7 +35,7 @@ import { CBrainDB } from "../src/storage/sqlite.js";
 import { runFsck } from "../src/cli/commands/fsck.js";
 import { buildRepairPlan } from "../src/core/fsck/repair-plan.js";
 import { evaluateConsistencyGate } from "../src/core/fsck/consistency-gate.js";
-import { LanceDBManager, type ChunkData } from "../src/storage/lancedb.js";
+import { LanceDBManager, VECTOR_DIMENSIONS, type ChunkData } from "../src/storage/lancedb.js";
 import type { ConsistencyGateResult, GateFinding } from "../src/core/fsck/consistency-gate.js";
 import type { FsckReport, FsckLanceState } from "../src/core/fsck/types.js";
 import type { RepairPlanStatus } from "../src/core/fsck/repair-plan.js";
@@ -160,7 +160,9 @@ async function seedHealthyLance(f: FixtureDirs): Promise<void> {
 				pageSlug: "entities/fixture-anon",
 				chunkIndex: 0,
 				content: "fixture body",
-				vector: new Float32Array(1024),
+				// The fixture vector width must match the manager's schema width
+				// (the 2048d default here). A mismatch is refused, not coerced.
+				vector: new Float32Array(VECTOR_DIMENSIONS),
 			},
 		];
 		await lance.addChunks(chunks);

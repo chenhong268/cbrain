@@ -21,7 +21,9 @@ import * as lancedb from "@lancedb/lancedb";
 import type { CBrainDB } from "./sqlite.js";
 import type { EmbeddingProvider } from "../embedding/provider.js";
 import type { EmbeddingResult } from "../embedding/provider.js";
-import { CHUNKS_SCHEMA, INSIGHTS_SCHEMA } from "./lancedb.js";
+import { assertStorableVector, vectorIndexIdentity, vectorSchemas, writeIndexIdentity, DOCUMENT_ENCODING_VERSION } from "./lance-identity.js";
+import type { VectorIndexIdentity } from "./lance-identity.js";
+import { normalizeVector } from "./lancedb.js";
 
 // ── Types ───────────────────────────────────────────────────
 
@@ -35,6 +37,9 @@ export interface RebuildResult {
   readonly errorDetails: readonly string[];
   /** Path to backup of old live directory, or null */
   readonly backupPath: string | null;
+  /** #545: true when SQLite held no source data, so the live index and its identity were kept
+   * as-is. A no-op is NOT a model migration and must never be reported as one. */
+  readonly noOp: boolean;
 }
 
 /** Filesystem operations — injectable for testing */
@@ -61,6 +66,9 @@ export interface RebuildOptions {
   readonly chunkBatchSize?: number;
   readonly insightBatchSize?: number;
   readonly onProgress?: (progress: RebuildProgress) => void;
+  /** #545: identity of the model producing these vectors, written into the staging directory after
+   * verification, so a new index always carries the model that built it. */
+  readonly identity?: VectorIndexIdentity;
 }
 
 export const DEFAULT_REBUILD_BATCH_SIZE = 256;
@@ -85,6 +93,7 @@ async function embedInBatches<T>(input: {
   content: (row: T) => string;
   embedding: EmbeddingProvider;
   batchSize: number;
+  dimensions: number;
   phase: RebuildProgressPhase;
   onProgress?: RebuildOptions["onProgress"];
 }): Promise<EmbeddingResult[]> {
@@ -95,6 +104,11 @@ async function embedInBatches<T>(input: {
     const embedded = await input.embedding.embedBatch(rows.map(input.content));
     if (embedded.length !== rows.length) {
       throw new Error(`EMBEDDING_COUNT_MISMATCH: ${input.phase} batch returned ${embedded.length}, expected ${rows.length}`);
+    }
+    // #545 R2: a provider that returns another width — or a NaN / Infinity / Float32 overflow
+    // value — must fail here, before any row reaches the table.
+    for (const [index, result] of embedded.entries()) {
+      assertStorableVector(result.embedding, input.dimensions, `${input.phase} provider row ${offset + index}`);
     }
     out.push(...embedded);
     const batch = Math.floor(offset / input.batchSize) + 1;
@@ -107,6 +121,36 @@ async function embedInBatches<T>(input: {
     });
   }
   return out;
+}
+
+/**
+ * #545 R2: check the vectors the staging index actually stores — not only the ones the provider
+ * returned. Reading them back catches a store that silently pads, truncates, or coerces a row.
+ */
+async function verifyStoredVectors(input: {
+  conn: lancedb.Connection;
+  tableName: "chunks" | "insights";
+  dimensions: number;
+  expectedRows: number;
+}): Promise<void> {
+  const pageSize = 1024;
+  const table = await input.conn.openTable(input.tableName);
+  let verified = 0;
+  for (let offset = 0; offset < input.expectedRows; offset += pageSize) {
+    const rows = await table.query().select(["vector"]).limit(pageSize).offset(offset).toArray();
+    if (rows.length === 0) break;
+    rows.forEach((row, index) => {
+      assertStorableVector(
+        normalizeVector((row as Record<string, unknown>).vector),
+        input.dimensions,
+        `stored ${input.tableName} row ${offset + index}`,
+      );
+    });
+    verified += rows.length;
+  }
+  if (verified !== input.expectedRows) {
+    throw new Error(`VERIFY_FAIL: ${input.tableName} stored ${verified} vectors, expected ${input.expectedRows}`);
+  }
 }
 
 // ── Main rebuilder ──────────────────────────────────────────
@@ -131,6 +175,12 @@ export async function rebuildLanceIndex(
 ): Promise<RebuildResult> {
   const chunkBatchSize = normalizeBatchSize(options.chunkBatchSize, "chunkBatchSize");
   const insightBatchSize = normalizeBatchSize(options.insightBatchSize, "insightBatchSize");
+  // #545: the width comes from the provider that actually produces the vectors.
+  const dimensions = embedding.dimensions;
+  const schemas = vectorSchemas(dimensions);
+  const identity = options.identity
+    ? vectorIndexIdentity({ ...options.identity, dimensions, documentEncoding: DOCUMENT_ENCODING_VERSION })
+    : null;
   // ── 0. Read source data from SQLite ──
   // #269: rebuild BOTH L0 raw chunks (summary_level = 0) AND L1 summary chunks
   // (summary_level = 1, chunk_index = -1). Filtering to L0 only silently dropped
@@ -150,17 +200,19 @@ export async function rebuildLanceIndex(
   // ── No-op: empty SQLite ──
   if (!hasSqliteData) {
     if (liveExists) {
-      // Don't replace a working live index with empty staging
+      // Don't replace a working live index with empty staging: this preserves an index, it does not
+      // migrate one, and the live index keeps its own identity.
       return {
         chunksRebuilt: 0, insightsRebuilt: 0, errors: 0,
-        errorDetails: [], backupPath: null,
+        errorDetails: [], backupPath: null, noOp: true,
       };
     }
-    // No data anywhere — create empty live
+    // No data anywhere — create an empty live directory and write no identity: with no tables there
+    // is no index to describe yet (#545 R4).
     fs.mkdirSync(lancePath, { recursive: true });
     return {
       chunksRebuilt: 0, insightsRebuilt: 0, errors: 0,
-      errorDetails: [], backupPath: null,
+      errorDetails: [], backupPath: null, noOp: true,
     };
   }
 
@@ -180,6 +232,7 @@ export async function rebuildLanceIndex(
       content: (row) => row.content as string,
       embedding,
       batchSize: chunkBatchSize,
+      dimensions,
       phase: "chunks",
       onProgress: options.onProgress,
     });
@@ -192,7 +245,7 @@ export async function rebuildLanceIndex(
     const rebuiltPageCount = new Set(chunkRows.map((row) => row.page_slug as string)).size;
 
     if (allChunkData.length > 0) {
-      await stagingConn.createTable("chunks", allChunkData, { schema: CHUNKS_SCHEMA, mode: "create" });
+      await stagingConn.createTable("chunks", allChunkData, { schema: schemas.chunks, mode: "create" });
     }
 
     // ── 3. Build insights table ──
@@ -202,6 +255,7 @@ export async function rebuildLanceIndex(
         content: (row) => row.content as string,
         embedding,
         batchSize: insightBatchSize,
+        dimensions,
         phase: "insights",
         onProgress: options.onProgress,
       });
@@ -210,7 +264,7 @@ export async function rebuildLanceIndex(
         content: row.content as string,
         vector: new Float32Array(embedResults[i].embedding),
       }));
-      await stagingConn.createTable("insights", insightData, { schema: INSIGHTS_SCHEMA, mode: "create" });
+      await stagingConn.createTable("insights", insightData, { schema: schemas.insights, mode: "create" });
     }
 
     // ── 4. Verify staging matches SQLite exactly ──
@@ -268,6 +322,18 @@ export async function rebuildLanceIndex(
       }
     }
 
+    // #545 R2: validate the vectors staging actually stores, not only the ones the provider returned.
+    if (chunkRows.length > 0) {
+      await verifyStoredVectors({ conn: stagingConn, tableName: "chunks", dimensions, expectedRows: chunkRows.length });
+    }
+    if (insightRows.length > 0) {
+      await verifyStoredVectors({ conn: stagingConn, tableName: "insights", dimensions, expectedRows: insightRows.length });
+    }
+
+    // #545: commit the model identity only after staging verified — it travels with the directory
+    // swap, so a failed build leaves the old index and its own identity in place.
+    if (identity) writeIndexIdentity(stagingPath, identity);
+
     // Close staging before filesystem operations
     stagingConn.close();
     stagingConn = null;
@@ -306,6 +372,7 @@ export async function rebuildLanceIndex(
       errors: 0,
       errorDetails: [],
       backupPath,
+      noOp: false,
   };
   } finally {
     // Always clean up: close staging conn + remove staging dir if it still exists

@@ -53,7 +53,7 @@ describe("handleReindexVectors", () => {
     ).run("entities/a", "content for a");
 
     const logs: string[] = [];
-    const exitCode = await handleReindexVectors(lancePath, db, embedding, { blockingOwner: () => null }, (msg) => logs.push(msg));
+    const exitCode = await handleReindexVectors(lancePath, db, embedding, { blockingOwner: () => null }, undefined, (msg) => logs.push(msg));
 
     expect(exitCode).toBe(0);
     expect(logs.some(l => l.includes("Rebuilt:"))).toBe(true);
@@ -84,6 +84,7 @@ describe("handleReindexVectors", () => {
       db,
       failingEmbedding as any,
       { blockingOwner: () => null },
+      undefined,
       () => {},
       (msg) => errors.push(msg),
     );
@@ -145,6 +146,7 @@ describe("handleReindexVectors", () => {
       db,
       embedding,
       blocking,
+      undefined,
       () => {},
       (msg) => errors.push(msg),
     );

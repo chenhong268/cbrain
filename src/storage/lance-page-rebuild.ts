@@ -25,6 +25,7 @@ import {
   type LanceDBManager,
   type RawVectorRow,
 } from "./lancedb.js";
+import { assertStorableVector } from "./lance-identity.js";
 
 // ── Public types ────────────────────────────────────────────────────────
 
@@ -110,17 +111,18 @@ export async function rebuildPageVectors(
     return abortedUnchanged(anon, `embedding failed: ${sanitizeError(e)}`);
   }
 
-  // Validate embedding count, dimensions, and chunk-index uniqueness.
-  const dim = embedding.dimensions;
+  // Validate embedding count and chunk-index uniqueness, and every vector against the width the
+  // index ACTUALLY stores rather than the width the provider claims (#545 F1). All of this happens
+  // while the live index is untouched, so a rejected batch never reaches the delete/add phase.
+  const dim = lance.vectorDimensions;
   if (embedResults.length !== rawChunks.length) {
-    return abortedUnchanged(
-      anon,
-      `embedding count mismatch (${embedResults.length} != ${rawChunks.length})`,
-    );
+    return abortedUnchanged(anon, `embedding count mismatch (${embedResults.length} != ${rawChunks.length})`);
   }
-  for (const r of embedResults) {
-    if (!r.embedding || r.embedding.length !== dim) {
-      return abortedUnchanged(anon, `embedding dimension mismatch (expected ${dim})`);
+  for (const [index, result] of embedResults.entries()) {
+    try {
+      assertStorableVector(result.embedding, dim, `chunk ${index}`);
+    } catch (e) {
+      return abortedUnchanged(anon, `embedding rejected: ${sanitizeError(e)}`);
     }
   }
   const indexSet = new Set(rawChunks.map((c) => c.chunk_index));

@@ -11,17 +11,20 @@ const TEST_DIR = "/tmp/cbrain-test-sync-rollback";
 function newDb(): CBrainDB { return new CBrainDB(join(TEST_DIR, "test.sqlite")); }
 
 function fakeEmbeddingProvider() {
+  // #545 R2: the fixture width must match the manager's schema width (the legacy
+  // 2048d default here). A provider that returns another width is now refused
+  // instead of being padded into the table, so the fixture states one width.
   return {
-    dimensions: 128,
+    dimensions: 2048,
     embed: async (text: string) => {
-      const vec = new Array(128).fill(0);
-      for (let i = 0; i < text.length; i++) vec[i % 128] += text.charCodeAt(i) / 65536;
+      const vec = new Array(2048).fill(0);
+      for (let i = 0; i < text.length; i++) vec[i % 2048] += text.charCodeAt(i) / 65536;
       return { embedding: vec, tokenCount: text.length };
     },
     embedBatch: async (texts: string[]) =>
       texts.map((t) => {
-        const vec = new Array(128).fill(0);
-        for (let i = 0; i < t.length; i++) vec[i % 128] += t.charCodeAt(i) / 65536;
+        const vec = new Array(2048).fill(0);
+        for (let i = 0; i < t.length; i++) vec[i % 2048] += t.charCodeAt(i) / 65536;
         return { embedding: vec, tokenCount: t.length };
       }),
   };

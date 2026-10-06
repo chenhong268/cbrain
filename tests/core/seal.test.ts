@@ -14,7 +14,9 @@ function makeLLM(response: string): LLMProvider {
   };
 }
 
-function makeEmbedding(dimensions = 4): EmbeddingProvider {
+// #545 R2: the fixture width must match the manager's schema width (2048d by
+// default). A narrower vector is refused instead of being padded into the table.
+function makeEmbedding(dimensions = 2048): EmbeddingProvider {
   return {
     dimensions,
     embed: mock(async () => ({
@@ -166,7 +168,8 @@ describe("SealManager", () => {
       db.ftsDeleteByPage("sync-page");
 
       const newChunks = [{ index: 0, content: "updated content" }];
-      const embedResults = [{ embedding: [0.1, 0.1, 0.1, 0.1], tokenCount: 5 }];
+      // #545 R2: the vector width must match the manager schema width (2048d).
+      const embedResults = [{ embedding: new Array(2048).fill(0.1), tokenCount: 5 }];
       await lance.addChunks(newChunks.map((c, i) => ({
         pageSlug: "sync-page",
         chunkIndex: c.index,

@@ -17,7 +17,10 @@ function makeLLM(response: string): LLMProvider {
   };
 }
 
-function makeEmbedding(dimensions = 4): EmbeddingProvider {
+// #545 R2: the fixture width must match the manager's schema width (2048d by
+// default). A provider that returns another width is refused instead of being
+// padded into the table, so the fixture states the real width.
+function makeEmbedding(dimensions = 2048): EmbeddingProvider {
   return {
     dimensions,
     embed: mock(async () => ({
