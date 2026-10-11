@@ -489,7 +489,7 @@ describe("content frontdoor honesty sequencing", () => {
     });
     const fallback = result("fts-rescue", {
       fts: { original: { rankScore: 30, rootLexicalCoverage: 0.4 } },
-    }, "匿名决策已记录", "fts");
+    }, "匿名新版决策已记录，扩大试用条件同步登记。", "fts");
     fallback.score = 30;
     const runnerUp = result("fts-runner-up", {
       fts: { original: { rankScore: 14, rootLexicalCoverage: 0.2 } },
@@ -1103,7 +1103,7 @@ describe("content frontdoor honesty sequencing", () => {
     unsupportedLeader.score = 28;
     const fallback = result("fts-rescue", {
       fts: { original: { rankScore: 20, rootLexicalCoverage: 0.4 } },
-    }, "匿名决策已记录", "fts");
+    }, "匿名扩大试用的已确认决策已记录，准入条件同步登记。", "fts");
     fallback.score = 20;
     const weakTail = result("fts-tail", {
       fts: { original: { rankScore: 10, rootLexicalCoverage: 0.2 } },
@@ -1149,11 +1149,11 @@ describe("content frontdoor honesty sequencing", () => {
     });
     const firstChunk = result("single-supported-page", {
       fts: { original: { rankScore: 30, rootLexicalCoverage: 0.4 } },
-    }, "匿名记录的第一段", "fts");
+    }, "匿名记录已明确写入第一段。", "fts");
     firstChunk.score = 30;
     const secondChunk = result("single-supported-page", {
       fts: { original: { rankScore: 22, rootLexicalCoverage: 0.4 } },
-    }, "匿名记录的第二段", "fts");
+    }, "匿名记录的第二段也明确了补充说明。", "fts");
     secondChunk.score = 22;
     const unrelatedPage = result("other-page", {
       fts: { original: { rankScore: 12, rootLexicalCoverage: 0.2 } },
