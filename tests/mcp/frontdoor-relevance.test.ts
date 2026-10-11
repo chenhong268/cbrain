@@ -489,7 +489,7 @@ describe("content frontdoor honesty sequencing", () => {
     });
     const fallback = result("fts-rescue", {
       fts: { original: { rankScore: 30, rootLexicalCoverage: 0.4 } },
-    }, "匿名决策已记录", "fts");
+    }, "匿名新版决策已记录，扩大试用条件同步登记。", "fts");
     fallback.score = 30;
     const runnerUp = result("fts-runner-up", {
       fts: { original: { rankScore: 14, rootLexicalCoverage: 0.2 } },
@@ -1103,7 +1103,7 @@ describe("content frontdoor honesty sequencing", () => {
     unsupportedLeader.score = 28;
     const fallback = result("fts-rescue", {
       fts: { original: { rankScore: 20, rootLexicalCoverage: 0.4 } },
-    }, "匿名决策已记录", "fts");
+    }, "匿名扩大试用的已确认决策已记录，准入条件同步登记。", "fts");
     fallback.score = 20;
     const weakTail = result("fts-tail", {
       fts: { original: { rankScore: 10, rootLexicalCoverage: 0.2 } },
@@ -1149,11 +1149,11 @@ describe("content frontdoor honesty sequencing", () => {
     });
     const firstChunk = result("single-supported-page", {
       fts: { original: { rankScore: 30, rootLexicalCoverage: 0.4 } },
-    }, "匿名记录的第一段", "fts");
+    }, "匿名记录已明确写入第一段。", "fts");
     firstChunk.score = 30;
     const secondChunk = result("single-supported-page", {
       fts: { original: { rankScore: 22, rootLexicalCoverage: 0.4 } },
-    }, "匿名记录的第二段", "fts");
+    }, "匿名记录的第二段也明确了补充说明。", "fts");
     secondChunk.score = 22;
     const unrelatedPage = result("other-page", {
       fts: { original: { rankScore: 12, rootLexicalCoverage: 0.2 } },
@@ -2091,4 +2091,68 @@ describe("content recall retains the requested passage after document discovery"
     const envelope = parsed(await h.call({ query: "主题D的参加情况是什么？", detail: "normal" })) as { raw: { entities: Array<{ snippet: string }> } };
     expect(envelope.raw.entities[0]!.snippet).toBe(snippet);
   });
+});
+
+describe("#552 controlled FTS rescue frontdoor pairs", () => {
+  const ANSWERING = {
+    reporting: "回退开关启用和备份数据清理都必须报备，报备情况会记入当班的登记本。",
+    timeout: "回退开关启用后默认超时十五分钟，未确认时自动恢复为启用状态，超时事件会写进日志。",
+  } as const;
+  // Anonymous topic-only page: repeats the question's topic wording and states no asked fact.
+  const TOPIC_ONLY = "新版本上线前要走三轮验证，先小范围内测，再逐步扩大范围，最后才全量发布。每一轮都必须保留一个随时可用的回退开关，回退动作不需要重新构建，也不需要重新审批。三轮验证之间至少间隔一个完整的观察周期，观察周期内只收集指标，不做任何新的变更。如果任一环节的指标超出预期阈值，当轮验证立即停止，并由值班人决定是否触发回退开关。";
+  const pairs = [
+    {
+      label: "reporting",
+      query: "回退开关的触发与备份清理都需要事先报备吗",
+      slug: "records/fts-reporting",
+      snippet: ANSWERING.reporting,
+    },
+    {
+      label: "timeout",
+      query: "发布回退开关的默认超时时间是多久",
+      slug: "records/fts-timeout",
+      snippet: ANSWERING.timeout,
+    },
+  ] as const;
+  // Every lead carries the same FTS coverage floor (0.4), so only the #552 Han
+  // bigram limit decides the outcome. Normal admission rejects a 0.4-coverage
+  // lead before the FTS-only channel runs, and this harness reports no vector
+  // identity, so the FTS rescue is the only channel that can admit a page.
+  const lead = (slug: string, snippet: string): SearchResult => {
+    const value = result(slug, { fts: { original: { rankScore: 20, rootLexicalCoverage: 0.4 } } }, snippet, "fts");
+    value.score = 20;
+    return value;
+  };
+
+  for (const { label, query, slug, snippet } of pairs) {
+    test(`${label}: normal admission rejects the answering page and the FTS rescue admits it`, async () => {
+      for (const detail of ["brief", "normal"] as const) {
+        const harness = makeHarness([lead(slug, snippet)], "legacy", { fallbackResults: [lead(slug, snippet)] });
+        const output = parsed(await harness.call({ query, detail })) as {
+          summary: { status: string; count: number };
+          raw: { entities: Array<{ title: string }> };
+        };
+
+        expect(output.summary).toMatchObject({ status: "ok", count: 1 });
+        expect(output.raw.entities.map((entity) => entity.title)).toEqual([`标题-${slug}`]);
+        // The second call proves normal admission returned nothing first.
+        expect(harness.searchCalls.map((call) => call.options?.strategy)).toEqual([undefined, "fts"]);
+      }
+    });
+
+    test(`${label}: the topic-only page stays empty`, async () => {
+      for (const detail of ["brief", "normal"] as const) {
+        const topicOnly = lead("records/fts-topic-only", TOPIC_ONLY);
+        const harness = makeHarness([topicOnly], "legacy", { fallbackResults: [lead("records/fts-topic-only", TOPIC_ONLY)] });
+        const output = parsed(await harness.call({ query, detail })) as {
+          summary: { status: string; count: number };
+          raw: { entities: unknown[] };
+        };
+
+        expect(output.summary).toMatchObject({ status: "empty", count: 0 });
+        expect(output.raw.entities).toEqual([]);
+        expect(harness.searchCalls.map((call) => call.options?.strategy)).toEqual([undefined, "fts"]);
+      }
+    });
+  }
 });

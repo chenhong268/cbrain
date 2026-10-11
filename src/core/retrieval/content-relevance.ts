@@ -20,6 +20,17 @@ const FTS_FALLBACK_MIN_COVERAGE = 0.4;
 const FTS_FALLBACK_DOMINANCE_RATIO = 2;
 const FTS_FALLBACK_MIN_SHARE_OF_TOP_SCORE = 0.6;
 const FTS_CJK_ANCHOR_MIN_UNITS = 4;
+// #552 — the coverage floor admits a lead on two matching query units inside
+// one evidence window, which a page that only repeats the question's topic
+// words can satisfy while answering nothing. Require the lead to also share
+// enough of the question's Han bigrams. The ratio is set coverage over Han
+// runs, so the repeated wording need not be contiguous. On the frozen corpus
+// the measured bands are same-topic leads 0.26-0.30 and answering leads
+// 0.37-0.43, so 1/3 splits those rows. The measured coverage, shared-run and
+// longest-common-subsequence features do not separate every row: one measured
+// legitimate row scores 0.286 and is rejected by this limit. That conservative
+// trade-off is accepted for now and is asserted in the unit tests.
+const FTS_FALLBACK_MIN_QUERY_BIGRAM_COVERAGE = 1 / 3;
 
 export interface ContentCandidateDecision {
   readonly accepted: boolean;
@@ -114,7 +125,10 @@ export function filterContentCandidates(
  * Bounded rescue for content recall after its normal fail-closed admission
  * returns nothing. Natural-language questions often contain more context than
  * the matching memory, so a high-confidence FTS lead may not reach the normal
- * 0.6 lexical threshold. Never return more than the single dominant FTS hit.
+ * 0.6 lexical threshold. The lead must still repeat a contiguous run of the
+ * question's characters (#552): the coverage floor alone admits a page that
+ * only repeats the question's topic words and answers nothing. Never return
+ * more than the single dominant FTS hit.
  */
 export function filterContentFtsFallbackCandidates(
   query: string,
@@ -147,6 +161,7 @@ export function filterContentFtsFallbackCandidates(
     top
     && top.score >= strongestScore * FTS_FALLBACK_MIN_SHARE_OF_TOP_SCORE
     && (!runnerUp || top.score >= runnerUp.score * FTS_FALLBACK_DOMINANCE_RATIO)
+    && adjacentHanBigramCoverage(query, top.snippet) >= FTS_FALLBACK_MIN_QUERY_BIGRAM_COVERAGE
   ) return keepCertifiedCauseEvidence(query, [top], options);
 
   const [anchoredTop, anchoredRunnerUp] = [...strongestBySlug.values()].sort(descendingScore);
@@ -237,6 +252,37 @@ function hasLeadingCjkAnchor(query: string, evidence: string): boolean {
   if (!cjkPrefix) return false;
   const anchor = Array.from(cjkPrefix).slice(0, FTS_CJK_ANCHOR_MIN_UNITS).join("");
   return compactLexicalUnits(evidence).join("").includes(anchor);
+}
+
+/**
+ * #552 — share of the question's adjacent Han bigrams the evidence repeats.
+ * Only Han characters pair up, so punctuation and latin/digit characters
+ * cannot carry the ratio. The two sides are compared as bigram sets, so the
+ * shared wording does not have to appear as one contiguous run. A question
+ * without a single Han bigram keeps the pre-existing behavior of the coverage
+ * floor alone.
+ */
+function adjacentHanBigramCoverage(query: string, evidence: string): number {
+  const queryBigrams = adjacentHanBigrams(query);
+  if (queryBigrams.size === 0) return 1;
+  const evidenceBigrams = adjacentHanBigrams(evidence);
+  let matched = 0;
+  for (const bigram of queryBigrams) if (evidenceBigrams.has(bigram)) matched += 1;
+  return matched / queryBigrams.size;
+}
+
+function adjacentHanBigrams(value: string): Set<string> {
+  const bigrams = new Set<string>();
+  let previous: string | undefined;
+  for (const character of value.normalize("NFKC").toLowerCase()) {
+    if (!/^\p{Script=Han}$/u.test(character)) {
+      previous = undefined;
+      continue;
+    }
+    if (previous !== undefined) bigrams.add(`${previous}${character}`);
+    previous = character;
+  }
+  return bigrams;
 }
 
 function compactLexicalUnits(value: string): string[] {
