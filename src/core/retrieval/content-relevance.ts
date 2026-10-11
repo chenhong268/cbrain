@@ -22,10 +22,12 @@ const FTS_FALLBACK_MIN_SHARE_OF_TOP_SCORE = 0.6;
 const FTS_CJK_ANCHOR_MIN_UNITS = 4;
 // #552 — the coverage floor admits a lead on two matching query units inside
 // one evidence window, which a page that only repeats the question's topic
-// words can satisfy while answering nothing. Require the lead to also repeat a
-// contiguous run of the question's characters. Measured on the frozen corpus:
-// vacuous leads score 0.20-0.29, answering leads 0.40-0.43, so 1/3 sits in the
-// empty band between the two.
+// words can satisfy while answering nothing. Require the lead to also share
+// enough of the question's Han bigrams. The ratio is set coverage over Han
+// runs, so the repeated wording need not be contiguous. Measured on the frozen
+// corpus: same-topic leads 0.26-0.30, answering leads 0.37-0.43, so 1/3 splits
+// them. Known boundary: one measured legitimate row scores 0.286 and needs the
+// documented trade-off in `.handoff/result-552-r2.md`.
 const FTS_FALLBACK_MIN_QUERY_BIGRAM_COVERAGE = 1 / 3;
 
 export interface ContentCandidateDecision {
@@ -253,8 +255,10 @@ function hasLeadingCjkAnchor(query: string, evidence: string): boolean {
 /**
  * #552 — share of the question's adjacent Han bigrams the evidence repeats.
  * Only Han characters pair up, so punctuation and latin/digit characters
- * cannot carry the ratio. A question without a single Han bigram keeps the
- * pre-existing behavior of the coverage floor alone.
+ * cannot carry the ratio. The two sides are compared as bigram sets, so the
+ * shared wording does not have to appear as one contiguous run. A question
+ * without a single Han bigram keeps the pre-existing behavior of the coverage
+ * floor alone.
  */
 function adjacentHanBigramCoverage(query: string, evidence: string): number {
   const queryBigrams = adjacentHanBigrams(query);

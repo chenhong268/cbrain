@@ -278,3 +278,74 @@ describe("FTS rescue requires a shared character run", () => {
       .map((item) => item.slug)).toEqual(["records/匿名页"]);
   });
 });
+
+/**
+ * Round 2 (#552 R2): the FTS rescue needs a front-door positive for the
+ * content-sufficient version of the B4/B5 pairs. Normal admission rejects a
+ * lead that stays under the coverage floor, so the FTS rescue is the only path
+ * that can admit it. The pair proves that path still admits the correct page,
+ * and the negative control proves the same question keeps the insufficient
+ * page rejected.
+ *
+ * Snippet wording is frozen corpus text from the private anonymous store
+ * (`<pair root>/env/vault/records`); each ratio is the measured
+ * adjacent-Han-bigram coverage of that question against that snippet.
+ */
+describe("FTS rescue positive pair", () => {
+  const FTS_FLOOR_COVERAGE = 0.4;
+  const PAGES = {
+    // records/主题g-回退开关超时 — states the timeout the question asks for.
+    timeoutFact: "回退开关启用后默认超时十五分钟，未确认时自动恢复为启用状态，超时事件会写进日志。",
+    // records/主题h-回退开关报备 — states the reporting duty the question asks about.
+    reportingFact: "回退开关启用和备份数据清理都必须报备，报备情况会记入当班的登记本。",
+    // records/主题d-发布节奏 — shares the topic wording only, states no asked fact.
+    topicOnly: "新版本上线前要走三轮验证，先小范围内测，再逐步扩大范围，最后才全量发布。每一轮都必须保留一个随时可用的回退开关，回退动作不需要重新构建，也不需要重新审批。三轮验证之间至少间隔一个完整的观察周期，观察周期内只收集指标，不做任何新的变更。如果任一环节的指标超出预期阈值，当轮验证立即停止，并由值班人决定是否触发回退开关。",
+    // records/实体a-批次窗口 — states how an unready upstream is handled.
+    batchWindowFact: "批量重建只在夜间窗口执行，白天保持只读。窗口长度固定为四小时，超过窗口的批次会被取消，而不是延长窗口时间。窗口开始前先检查上游数据是否就绪，未就绪则跳过本次批次并记录原因。批次执行期间不接收人工提交的重建请求，人工请求统一排到下一个窗口。每次批次结束后记录实际耗时和数据量，供下一个窗口参考。",
+  } as const;
+
+  const ftsLead = (slug: string, snippet: string): SearchResult =>
+    attachRetrievalSupport(
+      { slug, score: 1, snippet, source: "fts" },
+      { fts: { original: { rankScore: 1, rootLexicalCoverage: FTS_FLOOR_COVERAGE } } },
+    );
+
+  const pairs = [
+    ["reports the duty it asks about", "回退开关的触发与备份清理都需要事先报备吗", "records/匿名报备", PAGES.reportingFact], // 7/19
+    ["states the timeout it asks for", "发布回退开关的默认超时时间是多久", "records/匿名超时", PAGES.timeoutFact], // 6/15
+  ] as const;
+
+  test("normal admission rejects every pair lead before the FTS rescue sees", () => {
+    for (const [, query, slug, snippet] of pairs) {
+      expect(filterContentCandidates(query, [ftsLead(slug, snippet)])).toEqual([]);
+    }
+  });
+
+  test.each(pairs)("FTS rescue alone admits the page that %s", (_label, query, slug, snippet) => {
+    expect(filterContentFtsFallbackCandidates(query, [ftsLead(slug, snippet)]).map((item) => item.slug))
+      .toEqual([slug]);
+  });
+
+  test("the same questions keep the insufficient page rejected", () => {
+    for (const [, query] of pairs) {
+      expect(filterContentFtsFallbackCandidates(query, [ftsLead("records/匿名节奏", PAGES.topicOnly)]))
+        .toEqual([]);
+    }
+  });
+
+  /**
+   * Codex round-1 replay, no-Qwen eligibility (#552 R1): the question asks how
+   * an unready upstream is handled and the page states it, so the FTS rescue is
+   * the only channel that can return it once the vector path is unavailable.
+   * Its measured coverage is 4/14, below the 1/3 floor the rest of this suite
+   * requires; no local lexical rule was found that admits this row while still
+   * rejecting the same-topic rows above. This test records the required
+   * behavior and stays expected-to-fail until that trade-off is decided.
+   * See `.handoff/result-552-r2.md` §R1 trade-off.
+   */
+  test.failing("no-Qwen replay keeps the unready-upstream answer", () => {
+    expect(filterContentFtsFallbackCandidates("上游数据没准备好时批次怎么处理", [
+      ftsLead("records/匿名批次", PAGES.batchWindowFact),
+    ]).map((item) => item.slug)).toEqual(["records/匿名批次"]);
+  });
+});
