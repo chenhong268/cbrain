@@ -24,10 +24,12 @@ const FTS_CJK_ANCHOR_MIN_UNITS = 4;
 // one evidence window, which a page that only repeats the question's topic
 // words can satisfy while answering nothing. Require the lead to also share
 // enough of the question's Han bigrams. The ratio is set coverage over Han
-// runs, so the repeated wording need not be contiguous. Measured on the frozen
-// corpus: same-topic leads 0.26-0.30, answering leads 0.37-0.43, so 1/3 splits
-// them. Known boundary: one measured legitimate row scores 0.286 and needs the
-// documented trade-off in `.handoff/result-552-r2.md`.
+// runs, so the repeated wording need not be contiguous. On the frozen corpus
+// the measured bands are same-topic leads 0.26-0.30 and answering leads
+// 0.37-0.43, so 1/3 splits those rows. The measured coverage, shared-run and
+// longest-common-subsequence features do not separate every row: one measured
+// legitimate row scores 0.286 and is rejected by this limit. That conservative
+// trade-off is accepted for now and is asserted in the unit tests.
 const FTS_FALLBACK_MIN_QUERY_BIGRAM_COVERAGE = 1 / 3;
 
 export interface ContentCandidateDecision {

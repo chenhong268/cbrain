@@ -334,18 +334,19 @@ describe("FTS rescue positive pair", () => {
   });
 
   /**
-   * Codex round-1 replay, no-Qwen eligibility (#552 R1): the question asks how
-   * an unready upstream is handled and the page states it, so the FTS rescue is
-   * the only channel that can return it once the vector path is unavailable.
-   * Its measured coverage is 4/14, below the 1/3 floor the rest of this suite
-   * requires; no local lexical rule was found that admits this row while still
-   * rejecting the same-topic rows above. This test records the required
-   * behavior and stays expected-to-fail until that trade-off is decided.
-   * See `.handoff/result-552-r2.md` §R1 trade-off.
+   * #552, option A (approved by the project owner): without Qwen eligibility the
+   * vector rescue is unavailable, so the FTS rescue is the only channel left.
+   * This question asks how an unready upstream is handled and the page states
+   * it, but the page's measured Han bigram coverage is 4/14 — the same value as
+   * the same-topic rows above. The measured coverage, shared-run and
+   * longest-common-subsequence features do not separate this row from those
+   * rows, so the accepted trade-off is a conservative rejection: the question
+   * returns no source instead of an unsupported one. This is a real assertion of
+   * the accepted behavior, not an expected failure.
    */
-  test.failing("no-Qwen replay keeps the unready-upstream answer", () => {
+  test("without Qwen eligibility the unready-upstream question is conservatively rejected", () => {
     expect(filterContentFtsFallbackCandidates("上游数据没准备好时批次怎么处理", [
       ftsLead("records/匿名批次", PAGES.batchWindowFact),
-    ]).map((item) => item.slug)).toEqual(["records/匿名批次"]);
+    ])).toEqual([]);
   });
 });
