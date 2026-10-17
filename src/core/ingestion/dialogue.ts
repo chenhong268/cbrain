@@ -203,6 +203,23 @@ export class DialogueIngest {
 
     const entitySlugMap = new Map<string, string>();
 
+    // #508 S1: per-call dedup for mention_count. Within ONE ingest call the
+    // same final slug may be reached by several surface forms across the
+    // resolve / exact-title-reuse / fresh-page branches; count it at most
+    // once. Deliberately local to this call: a new ingest call starts a new
+    // set, and cross-call/session/text identity is out of scope (#508 S1
+    // boundary). Only the counter is guarded — entity processing, alias
+    // recording and entitySlugMap stay untouched so downstream relation/
+    // fact/event handling keeps every surface form.
+    const countedSlugs = new Set<string>();
+    const countMentionOnce = (slug: string): void => {
+      if (countedSlugs.has(slug)) return;
+      // R1 (#508 supplement 1): register only after the increment succeeded,
+      // so a failed count call never poisons the set for a later surface form.
+      this.db.incrementMentionCount(slug);
+      countedSlugs.add(slug);
+    };
+
     // Step 1: Apply shared entity filter (blacklist, suffix patterns, generics, length, cap)
     const { kept, filtered } = filterExtractedEntities(result.entities, { mode });
     const filteredReport = filtered.map(f => ({
@@ -228,7 +245,7 @@ export class DialogueIngest {
 
       if (resolution.action === "resolved_to_existing" || resolution.action === "alias_added") {
         entitySlugMap.set(entity.name, resolution.slug);
-        this.db.incrementMentionCount(resolution.slug);
+        countMentionOnce(resolution.slug);
         skipped++;
       } else if (resolution.action === "duplicate_candidate" || resolution.action === "stub_created") {
         // #467: exact title collision — the resolver flagged a
@@ -243,7 +260,7 @@ export class DialogueIngest {
           this.db.getPageByTitle(entity.name)?.slug === resolution.slug
         ) {
           entitySlugMap.set(entity.name, resolution.slug);
-          this.db.incrementMentionCount(resolution.slug);
+          countMentionOnce(resolution.slug);
           skipped++;
           continue;
         }
@@ -279,7 +296,7 @@ export class DialogueIngest {
         });
 
         entitySlugMap.set(entity.name, slug);
-        this.db.incrementMentionCount(slug);
+        countMentionOnce(slug);
         newEntities++;
       }
     }
