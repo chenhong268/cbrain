@@ -1,6 +1,7 @@
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -17,7 +18,7 @@ import { TopicManager } from "../../src/core/topics/manager.js";
  * string (empty string included) and preserved as `null` when null. All other
  * fields keep their exact old shape. Verified through the real MCP path
  * (SDK Client + InMemoryTransport + attachMcpTools), never through handler
- * mocks. Anonymous fixtures only; temp resources under /private/tmp.
+ * mocks. Anonymous fixtures only; temp resources under the platform temp directory.
  */
 
 const TOPIC_SENTINEL = "TOPIC_BODY_SENTINEL_A"; // old topic body — must not leak once stale
@@ -79,7 +80,7 @@ describe("get_page single body copy (#553 candidate C)", () => {
       savedEnv[k] = process.env[k];
       delete process.env[k];
     }
-    root = mkdtempSync("/private/tmp/cbrain-553-impl-");
+    root = mkdtempSync(join(tmpdir(), "cbrain-553-impl-"));
     const vaultPath = join(root, "vault");
     mkdirSync(vaultPath, { recursive: true });
     db = new CBrainDB(join(root, "brain.sqlite"));
@@ -129,18 +130,23 @@ describe("get_page single body copy (#553 candidate C)", () => {
   });
 
   afterAll(async () => {
-    // close this file's own clients/servers before shared resources
-    await legacy.close();
-    await structured.close();
-    for (const s of servers) await s.close();
-    // R2: restore every saved key to its exact original value (undefined → absent)
-    for (const [k, v] of Object.entries(savedEnv)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
-    // R2 canary: a real run with an injected initial value observes full restoration
-    expect(process.env.CBRAIN_OUTPUT_BOUNDARY).toBe(savedEnv.CBRAIN_OUTPUT_BOUNDARY);
-    ctx.jobs.stop();
-    await lance.close();
-    db.close();
-    rmSync(root, { recursive: true, force: true });
+    try {
+      // close this file's own clients/servers before shared resources;
+      // R2: every resource is optional — if beforeAll failed partway, the
+      // not-yet-created ones stay undefined and must not throw here
+      await legacy?.close();
+      await structured?.close();
+      for (const s of servers ?? []) await s.close();
+      ctx?.jobs?.stop();
+      await lance?.close();
+      db?.close();
+    } finally {
+      // R2: restore every saved key to its exact original value (undefined → absent)
+      for (const [k, v] of Object.entries(savedEnv ?? {})) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+      // R2 canary: a real run with an injected initial value observes full restoration
+      expect(process.env.CBRAIN_OUTPUT_BOUNDARY).toBe(savedEnv?.CBRAIN_OUTPUT_BOUNDARY);
+      if (root) rmSync(root, { recursive: true, force: true });
+    }
   });
 
   // ── full page ≥30,000 chars: body serialized once, metadata intact ────
