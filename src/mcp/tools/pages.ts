@@ -111,6 +111,18 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
       include_full_body: z.boolean().optional().default(false).describe("Return full body instead of truncated (default: truncated to 1500 chars)"),
     },
   }, async ({ slug, include_full_body }) => {
+    // #553: the string body is serialized exactly once — inside `raw.body`.
+    // The old top-level copy duplicated every response (~50% of wire bytes).
+    // Removal condition is strictly `typeof body === "string"`: empty strings
+    // are removed too, while `null` (missing file / stale topic) keeps the
+    // exact old `body: null` shape — `raw.body ?? page.body` consumers and
+    // every other top-level field stay untouched.
+    const omitTopLevelStringBody = (payload: Record<string, unknown>): Record<string, unknown> => {
+      if (typeof payload.body !== "string") return payload;
+      const topLevel = { ...payload };
+      delete topLevel.body;
+      return topLevel;
+    };
     const row = ctx.db.getPage(slug);
     if (!row) {
       const { display, summary, raw } = formatGetPageEnvelope({ error: "Page not found" });
@@ -153,7 +165,7 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
               display: `《${row.title}》是自动生成的主题页，来源记录有更新，暂不可用；请以原始记录为准。`,
               summary,
               raw: { ...raw, ...payload },
-              ...payload,
+              ...omitTopLevelStringBody(payload),
             }, null, 2),
           }],
         };
@@ -181,7 +193,7 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
             display: `《${row.title}》是自动生成的派生主题页（非独立证据，源自 ${snap.sourceSlugs.length} 条原始记录）；细节以原始记录为准。`,
             summary,
             raw: { ...raw, ...payload },
-            ...payload,
+            ...omitTopLevelStringBody(payload),
           }, null, 2),
         }],
       };
@@ -205,7 +217,7 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
       const payload = { ...row, body, body_length: bodyLength, has_more: false };
       const { display, summary, raw } = formatGetPageEnvelope(payload);
       return {
-        content: [{ type: "text", text: JSON.stringify({ display, summary, raw, ...payload }, null, 2) }],
+        content: [{ type: "text", text: JSON.stringify({ display, summary, raw, ...omitTopLevelStringBody(payload) }, null, 2) }],
       };
     }
 
@@ -213,7 +225,7 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
     const payload = { ...row, body: trimmedBody, body_length: bodyLength, has_more };
     const { display, summary, raw } = formatGetPageEnvelope(payload);
     return {
-      content: [{ type: "text", text: JSON.stringify({ display, summary, raw, ...payload }, null, 2) }],
+      content: [{ type: "text", text: JSON.stringify({ display, summary, raw, ...omitTopLevelStringBody(payload) }, null, 2) }],
     };
   });
 
