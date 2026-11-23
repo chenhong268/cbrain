@@ -109,7 +109,7 @@ export function buildContext(deps: { db: CBrainDB; embedding: EmbeddingProvider;
   // #252: re-resolve defensively — createDeps already put the config-resolved mode in deps.nerIngestMode,
   // but env should still win if buildContext is called without going through createDeps.
   const nerMode = resolveIngestNerMode(process.env.CBRAIN_INGEST_NER_MODE, deps.nerIngestMode);
-  const deferredNerSubmitter = new JobQueueNerSubmitter(db);
+  const deferredNerSubmitter = new JobQueueNerSubmitter(db, logger);
   const cohortId = process.env.CBRAIN_ROLLOUT_COHORT_ID;
   const configIdentity = process.env.CBRAIN_ROLLOUT_CONFIG_IDENTITY;
   const deploymentDigest = process.env.CBRAIN_ROLLOUT_DEPLOYMENT_DIGEST;
