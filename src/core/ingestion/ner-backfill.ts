@@ -2,6 +2,7 @@
 import { buildNerAttemptIdentity, type CBrainDB, type NerAttemptIdentity } from "../../storage/sqlite.js";
 import type { PageManager } from "../page.js";
 import type { ContentPipeline } from "./pipeline.js";
+import type { Logger } from "../logger.js";
 import { isNerTimeoutError, getNerErrorCode } from "./ner.js";
 import type { LLMProvider } from "../../llm/provider.js";
 import { EntityFactsTimeoutError, extractEntityFacts } from "./entity-facts.js";
@@ -13,6 +14,7 @@ import {
   authorizeNerJobClaim,
   countCurrentGraphLinks,
   deriveZeroLinkSource,
+  finalizeIdentityStaleLiveJobs,
   finalizeRepairBatch,
   getRepairBatchAttemptIdentity,
   getNerJobProtection,
@@ -64,7 +66,11 @@ export interface DeferredNerSubmitter {
 
 /** Adapter over CBrainDB: dedup then submit. */
 export class JobQueueNerSubmitter implements DeferredNerSubmitter {
-  constructor(private db: CBrainDB) {}
+  constructor(
+    private db: CBrainDB,
+    /** #563: rejection reasons are otherwise silent on every write path. */
+    private logger?: Logger,
+  ) {}
 
   submitDeferredNer(input: DeferredNerInput): DeferredNerSubmitResult {
     this.db.rawDb.exec("BEGIN IMMEDIATE");
@@ -99,7 +105,7 @@ export class JobQueueNerSubmitter implements DeferredNerSubmitter {
   private submitNerEpoch(input: DeferredNerInput): DeferredNerSubmitResult {
     const page = this.db.getPage(input.slug);
     const source = deriveZeroLinkSource(this.db, input.slug);
-    if (!page || !source.contentFingerprint) return { disposition: "rejected", jobId: null, pending: false };
+    if (!page || !source.contentFingerprint) return this.reject(input.slug, "PAGE_OR_SOURCE_MISSING");
     const payload = {
       slug: input.slug,
       pageContentHash: page.content_hash,
@@ -116,9 +122,12 @@ export class JobQueueNerSubmitter implements DeferredNerSubmitter {
       return data?.slug === input.slug && kind === "ner" ? [{ ...row, parsed: data }] : [];
     });
 
+    // #563: a state conflict belongs to the slug that carries it. Other slugs are
+    // independent epochs and must stay submittable, or one stale row deadlocks the
+    // whole queue (no consumption, no replenishment). Structural conflicts stay global.
     const repairControl = inspectZeroLinkRepairControl(this.db, input.slug, source.contentFingerprint);
-    if (repairControl.queueIntegrityConflicts > 0 || repairControl.stateConflicts > 0) {
-      return { disposition: "rejected", jobId: null, pending: false };
+    if (repairControl.queueIntegrityConflicts > 0 || repairControl.slugStateConflict) {
+      return this.reject(input.slug, "QUEUE_INTEGRITY_CONFLICT");
     }
     if (repairControl.finalizedFingerprintOwned) {
       return { disposition: "already_processed", jobId: null, pending: false };
@@ -126,17 +135,17 @@ export class JobQueueNerSubmitter implements DeferredNerSubmitter {
     if (repairControl.unfinalizedOwnedJobId !== null) {
       return repairControl.unfinalizedOwnedLive
         ? { disposition: "existing_active", jobId: repairControl.unfinalizedOwnedJobId, pending: true }
-        : { disposition: "rejected", jobId: null, pending: false };
+        : this.reject(input.slug, "OWNED_JOB_NOT_LIVE");
     }
     const terminal = slugRows.filter((row) => !row.parsed.repair && row.parsed.sourceFingerprint === source.contentFingerprint && !["pending", "running"].includes(row.status));
     if (terminal.some((row) => row.status === "done" && safeJobData(row.result)?.outcome === "commit_unknown")) {
-      return { disposition: "rejected", jobId: null, pending: false };
+      return this.reject(input.slug, "COMMIT_UNKNOWN");
     }
     if (terminal.some((row) => row.status === "done" && safeJobData(row.result)?.outcome === "processed")) {
       return { disposition: "already_processed", jobId: null, pending: false };
     }
     if (terminal.some((row) => row.status === "failed" || row.status === "cancelled")) {
-      return { disposition: "rejected", jobId: null, pending: false };
+      return this.reject(input.slug, "TERMINAL_FAILED");
     }
 
     const live = slugRows.filter((row) => !row.parsed.repair && (row.status === "pending" || row.status === "running"));
@@ -144,11 +153,11 @@ export class JobQueueNerSubmitter implements DeferredNerSubmitter {
     if (current.length === 1 && (current[0].status === "pending" || !isOrdinaryStale(current[0].started_at))) {
       return { disposition: "existing_active", jobId: current[0].id, pending: true };
     }
-    if (current.length === 1) return { disposition: "rejected", jobId: null, pending: false };
-    if (current.length > 1) return { disposition: "rejected", jobId: null, pending: false };
+    if (current.length === 1) return this.reject(input.slug, "STALE_RUNNING_SINGLE");
+    if (current.length > 1) return this.reject(input.slug, "MULTIPLE_LIVE");
     const old = live.filter((row) => row.parsed.sourceFingerprint !== source.contentFingerprint);
     if (old.length !== 1 || current.length !== 0) {
-      if (old.length !== 0) return { disposition: "rejected", jobId: null, pending: false };
+      if (old.length !== 0) return this.reject(input.slug, "MULTIPLE_OLD_FINGERPRINT");
     } else {
       const predecessor = old[0];
       if (predecessor.status === "pending") {
@@ -161,7 +170,7 @@ export class JobQueueNerSubmitter implements DeferredNerSubmitter {
       }
       if (predecessor.status === "running") {
         const lease = predecessor.parsed.attemptLease as Record<string, unknown> | undefined;
-        if (lease?.phase === "committing") return { disposition: "rejected", jobId: null, pending: false };
+        if (lease?.phase === "committing") return this.reject(input.slug, "PREDECESSOR_COMMITTING");
         if (isOrdinaryStale(predecessor.started_at)) {
           const result = { outcome: "skipped", reason: "SOURCE_CHANGED", kind: "ner" };
           const { attemptLease: _removed, ...withoutLease } = predecessor.parsed;
@@ -180,6 +189,12 @@ export class JobQueueNerSubmitter implements DeferredNerSubmitter {
       "INSERT INTO jobs (name, data, priority) VALUES ('ner-backfill', ?, 0)",
     ).run(JSON.stringify(payload));
     return { disposition: "inserted", jobId: Number(inserted.lastInsertRowid), pending: true };
+  }
+
+  /** #563: every rejection carries a reason code so a stalled write path is diagnosable. */
+  private reject(slug: string, reason: string): DeferredNerSubmitResult {
+    this.logger?.warn("ner-backfill", "deferred NER submission rejected", { slug, reasonCode: reason });
+    return { disposition: "rejected", jobId: null, pending: false };
   }
 }
 
@@ -291,6 +306,9 @@ function unfilteredSnapshot(
 ): { ids: number[]; retriedFailed: number } {
   db.rawDb.exec("BEGIN IMMEDIATE");
   try {
+    // #563: clear a stale-pageContentHash live row before the global audit, otherwise one
+    // unclaimable pending job aborts the whole stage forever (52 days in production).
+    finalizeIdentityStaleLiveJobs(db);
     const audit = planZeroLinkBackfill(db, 0);
     if (audit.queueIntegrityConflicts > 0 || audit.stateConflicts > 0) throw new Error("QUEUE_INTEGRITY_CONFLICT");
     const protection = getNerJobProtection(db);

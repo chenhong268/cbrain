@@ -1048,6 +1048,8 @@ export function inspectZeroLinkRepairControl(
 ): {
   queueIntegrityConflicts: number;
   stateConflicts: number;
+  /** #563: whether THIS slug is the one in conflict; other slugs' conflicts are independent epochs. */
+  slugStateConflict: boolean;
   finalizedFingerprintOwned: boolean;
   unfinalizedOwnedJobId: number | null;
   unfinalizedOwnedLive: boolean;
@@ -1063,6 +1065,7 @@ export function inspectZeroLinkRepairControl(
   return {
     queueIntegrityConflicts: audit.queueIntegrityConflicts,
     stateConflicts: audit.globalStateConflictSlugs.size,
+    slugStateConflict: audit.globalStateConflictSlugs.has(slug),
     finalizedFingerprintOwned: audit.manifests.some(
       (manifest) => manifest.finalized && manifest.finalizedEntries.some(
         (entry) => entry.slug === slug && entry.contentFingerprint === fingerprint && finalizedEntryOwnsEpoch(entry),
@@ -1071,6 +1074,44 @@ export function inspectZeroLinkRepairControl(
     unfinalizedOwnedJobId: unfinalized?.owner.jobId ?? null,
     unfinalizedOwnedLive: Boolean(child && ACTIVE_STATUSES.has(child.status)),
   };
+}
+
+/**
+ * #563: governed exit for a live ordinary job whose frozen identity is stale only in
+ * pageContentHash while sourceFingerprint still matches the current source (raw-chunk
+ * derived pages let the two drift independently). Such a pending row is never claimable
+ * and keeps its slug in globalStateConflictSlugs forever: unfilteredSnapshot throws and
+ * submitNerEpoch rejects every slug. Terminalize it as skipped/IDENTITY_STALE — the same
+ * shape the stage uses for stale running rows — so the next audit clears on its own.
+ * Structural (queueIntegrity) conflicts and committing leases stay fail-closed, untouched.
+ * Must run inside the caller's write transaction. Returns the number of rows finalized.
+ */
+export function finalizeIdentityStaleLiveJobs(db: ZeroLinkDb): number {
+  const audit = auditQueue(db);
+  if (audit.queueIntegrityConflicts > 0 || audit.globalStateConflictSlugs.size === 0) return 0;
+  let finalized = 0;
+  for (const row of audit.rows) {
+    if (row.name !== "ner-backfill" || !ACTIVE_STATUSES.has(row.status)) continue;
+    const data = audit.parsedById.get(row.id);
+    if (!data || data.kind !== "ner" || data.repair || !audit.globalStateConflictSlugs.has(data.slug)) continue;
+    if (row.status === "running" && (data.attemptLease?.phase === "committing" || !isStale(row))) continue;
+    if (!ordinaryFrozenIdentityValid(data) || data.sourceFingerprint === undefined || data.contentHash === undefined) continue;
+    if (data.sourceFingerprint !== deriveZeroLinkSource(db, data.slug).contentFingerprint) continue;
+    const page = db.rawDb.prepare("SELECT content_hash FROM pages WHERE slug=?").get(data.slug) as { content_hash: string | null } | undefined;
+    if (!page || data.contentHash === page.content_hash) continue;
+    const raw = parseJsonObject(row.data);
+    if (!raw) continue;
+    const { attemptLease: _removed, ...withoutLease } = raw;
+    const changed = db.rawDb.prepare(
+      "UPDATE jobs SET status='done', data=?, result=?, error=NULL, finished_at=datetime('now') WHERE id=? AND status=? AND data=?",
+    ).run(
+      JSON.stringify(withoutLease),
+      JSON.stringify({ outcome: "skipped", reason: "IDENTITY_STALE", kind: "ner" }),
+      row.id, row.status, row.data,
+    );
+    finalized += Number(changed.changes);
+  }
+  return finalized;
 }
 
 export interface NerJobProtection {

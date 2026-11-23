@@ -20,6 +20,7 @@ import { hasKnownRelationsDrift } from "../../src/core/graph/known-relations-pro
 import { probeLance } from "../../src/core/fsck/lance-probe";
 import { EntityFactsTimeoutError } from "../../src/core/ingestion/entity-facts";
 import { submitDeferredNerForWritePath } from "../../src/core/ingestion/ner-write-path";
+import type { Logger } from "../../src/core/logger";
 import {
   authorizeNerJobClaim,
   deriveZeroLinkSource,
@@ -2910,4 +2911,98 @@ test("Dream cancellation stops backfill before claiming the next record (#494)",
   expect(db.getJob(first)?.status).toBe("done"); // missing source is an explicit skip
   expect(db.getJob(second)?.status).toBe("pending");
   expect(db.getJob(second)?.attempts).toBe(0);
+});
+
+describe("deferred NER queue self-heal (#563)", () => {
+  /** Raw-chunk-derived page: its fingerprint follows chunks, so the page hash can drift on its own. */
+  const addSealedRecord = (slug: string, hash: string) => {
+    db.upsertPage({ slug, type: "record", title: slug, filePath: `${slug}.md`, contentHash: hash });
+    db.insertChunk(slug, 0, "body text");
+    db.insertChunkWithLevel(slug, 0, "summary", 1, "summary-hash");
+  };
+  const addPlainRecord = (slug: string, hash = "page-hash") => {
+    db.upsertPage({ slug, type: "record", title: slug, filePath: `${slug}.md`, contentHash: hash });
+    db.insertChunk(slug, 0, "first");
+  };
+  const stubPipeline = () => ({ processNer: async () => {} } as unknown as ContentPipeline);
+
+  test("audit still flags a stale pageContentHash row before any stage runs (#342 fail-closed kept)", () => {
+    addSealedRecord("records/poison", "h1");
+    const first = new JobQueueNerSubmitter(db).submitDeferredNer({ slug: "records/poison" });
+    expect(JSON.parse(db.getJob(first.jobId!)!.data!)).toMatchObject({ pageContentHash: "h1" });
+    // submit and hash update land in the same second — the production trigger for job 857
+    db.updatePageHash("records/poison", "h2");
+    expect(planZeroLinkBackfill(db)).toMatchObject({ status: "blocked", stateConflicts: 1, queueIntegrityConflicts: 0 });
+  });
+
+  test("born-stale job is terminalized as skipped/IDENTITY_STALE and the queue unblocks", async () => {
+    addSealedRecord("records/poison", "h1");
+    const s = new JobQueueNerSubmitter(db);
+    const first = s.submitDeferredNer({ slug: "records/poison" });
+    db.updatePageHash("records/poison", "h2");
+
+    await runNerBackfillStage(db, stubPipeline(), new PageManager(db, testDir), { maxItems: 10 });
+
+    expect(JSON.parse(db.getJob(first.jobId!)!.result!)).toEqual({ outcome: "skipped", reason: "IDENTITY_STALE", kind: "ner" });
+    expect(db.getJob(first.jobId!)!.status).toBe("done");
+    expect(db.getJob(first.jobId!)!.error).toBeNull();
+    expect(planZeroLinkBackfill(db)).toMatchObject({ status: "ok", stateConflicts: 0, queueIntegrityConflicts: 0 });
+    // the slug is submittable again: a skipped row is not epoch evidence
+    expect(s.submitDeferredNer({ slug: "records/poison" }).disposition).toBe("inserted");
+  });
+
+  test("one slug's state conflict no longer rejects unrelated slugs", () => {
+    addSealedRecord("records/poison", "h1");
+    addPlainRecord("records/fresh");
+    const s = new JobQueueNerSubmitter(db);
+    s.submitDeferredNer({ slug: "records/poison" });
+    db.updatePageHash("records/poison", "h2");
+    expect(s.submitDeferredNer({ slug: "records/poison" }).disposition).toBe("rejected"); // own conflict still blocks
+    expect(s.submitDeferredNer({ slug: "records/fresh" }).disposition).toBe("inserted"); // independent epoch flows
+    expect(db.listJobs("pending")).toHaveLength(2);
+  });
+
+  test("structural (queue integrity) conflicts stay global and leave the stale row byte-for-byte intact", async () => {
+    addSealedRecord("records/poison", "h1");
+    const s = new JobQueueNerSubmitter(db);
+    s.submitDeferredNer({ slug: "records/poison" });
+    db.updatePageHash("records/poison", "h2");
+    db.submitJob("ner-backfill", { pageType: "record" }); // malformed live row: no slug
+    expect(s.submitDeferredNer({ slug: "records/fresh" }).disposition).toBe("rejected");
+    const before = JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all());
+    await expect(runNerBackfillStage(db, stubPipeline(), new PageManager(db, testDir))).rejects.toThrow("QUEUE_INTEGRITY_CONFLICT");
+    expect(JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all())).toBe(before);
+  });
+
+  test("a fresh running row is left alone even if its page hash drifted mid-run", async () => {
+    addSealedRecord("records/poison", "h1");
+    const s = new JobQueueNerSubmitter(db);
+    const first = s.submitDeferredNer({ slug: "records/poison" });
+    expect(claimNerJob(first.jobId!)).not.toBeNull();
+    db.updatePageHash("records/poison", "h2");
+    const before = JSON.stringify(db.getJob(first.jobId!));
+    await expect(runNerBackfillStage(db, stubPipeline(), new PageManager(db, testDir))).rejects.toThrow("QUEUE_INTEGRITY_CONFLICT");
+    expect(JSON.stringify(db.getJob(first.jobId!))).toBe(before);
+  });
+
+  test("every rejection emits a reason-coded warn log", () => {
+    const logs: Array<{ module: string; message: string; details?: Record<string, unknown> }> = [];
+    const logger = {
+      info: () => {},
+      warn: (module: string, message: string, details?: Record<string, unknown>) => { logs.push({ module, message, details }); },
+      error: () => {},
+      // SAFETY: test double only needs the Logger surface JobQueueNerSubmitter calls.
+    } as unknown as Logger;
+    const s = new JobQueueNerSubmitter(db, logger);
+    addSealedRecord("records/poison", "h1");
+    s.submitDeferredNer({ slug: "records/poison" });
+    db.updatePageHash("records/poison", "h2");
+    expect(s.submitDeferredNer({ slug: "records/missing" }).disposition).toBe("rejected");
+    expect(s.submitDeferredNer({ slug: "records/poison" }).disposition).toBe("rejected");
+    expect(logs.map((entry) => entry.details?.reasonCode)).toEqual(["PAGE_OR_SOURCE_MISSING", "QUEUE_INTEGRITY_CONFLICT"]);
+    expect(logs[1]).toMatchObject({
+      module: "ner-backfill",
+      details: { slug: "records/poison", reasonCode: "QUEUE_INTEGRITY_CONFLICT" },
+    });
+  });
 });
