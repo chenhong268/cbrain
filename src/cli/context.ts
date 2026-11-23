@@ -1,6 +1,6 @@
 import { createHmac } from "node:crypto";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import { CBrainDB } from "../storage/sqlite.js";
 import { LanceDBManager } from "../storage/lancedb.js";
 import { ZhipuEmbeddingProvider, ZHIPU_EMBEDDING_MODEL } from "../embedding/zhipu.js";
@@ -147,14 +147,54 @@ function loadResolvedConfig(startDir: string, explicitPath?: string): LoadedCBra
   const configPath = resolveConfigPath(startDir, explicitPath);
   const configBytes = readFileSync(configPath);
   const rolloutKey = process.env.CBRAIN_ROLLOUT_CONFIG_IDENTITY;
+  const config = JSON.parse(configBytes.toString("utf8"));
+  warnIfConfigInsideOwnVault(configPath, config.vaultPath);
   return {
-    config: JSON.parse(configBytes.toString("utf8")),
+    config,
     configPath,
     configRoot: dirname(configPath),
     rolloutConfigAttestation: /^[a-f0-9]{64}$/.test(rolloutKey ?? "")
       ? createHmac("sha256", rolloutKey as string).update(configBytes).digest("hex")
       : undefined,
   };
+}
+
+// #561: fixed text only. No paths, field values or credentials cross the
+// console boundary (#383 privacy boundary).
+const CONFIG_INSIDE_OWN_VAULT_WARNING =
+  "[cbrain] Warning: cbrain.json is located inside the vault it manages. " +
+  "This is usually a stale forked copy whose embedding.provider and other fields " +
+  "silently differ from the active config. Set CBRAIN_CONFIG to the active config " +
+  "file and archive the in-vault copy (issue #561).";
+
+function realpathOrResolve(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return resolve(path);
+  }
+}
+
+/**
+ * #561: true when the config file sits inside the vault it configures (equal
+ * dir or a descendant). Such a copy is a stale-fork hazard: the cwd walk can
+ * select it and silently switch the embedding provider and feature fields.
+ */
+export function isConfigInsideOwnVault(configPath: string, vaultPath: string | undefined): boolean {
+  if (typeof vaultPath !== "string" || vaultPath.trim() === "") return false;
+  const configDir = realpathOrResolve(dirname(resolve(configPath)));
+  const vault = realpathOrResolve(resolve(vaultPath));
+  return configDir === vault || configDir.startsWith(vault + sep);
+}
+
+const warnedConfigPaths = new Set<string>();
+
+function warnIfConfigInsideOwnVault(configPath: string, vaultPath: string | undefined): void {
+  if (!isConfigInsideOwnVault(configPath, vaultPath)) return;
+  if (warnedConfigPaths.has(configPath)) return;
+  warnedConfigPaths.add(configPath);
+  // stderr on purpose: stdout is the MCP stdio protocol channel.
+  console.warn(CONFIG_INSIDE_OWN_VAULT_WARNING);
 }
 
 function exitConfigNotFound(error: ConfigNotFoundError): never {
