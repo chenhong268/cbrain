@@ -377,6 +377,26 @@ function readOutcome(row: JobRow): Record<string, unknown> | null {
   return parseJsonObject(row.result);
 }
 
+/**
+ * #563: whether another NER job on the same slug already carries epoch evidence this
+ * rewrite must not erase. Live rows (ordinary or repair) always do; terminal rows do when
+ * they are an ordinary row on the same sourceFingerprint that proves the epoch was consumed.
+ */
+function hasOtherEpochEvidence(
+  audit: QueueAudit,
+  jobId: number,
+  slug: string,
+  sourceFingerprint: string | undefined,
+): boolean {
+  return audit.rows.some((candidate) => {
+    if (candidate.id === jobId || candidate.name !== "ner-backfill") return false;
+    const other = audit.parsedById.get(candidate.id);
+    if (other?.kind !== "ner" || other.slug !== slug) return false;
+    if (ACTIVE_STATUSES.has(candidate.status)) return true;
+    return !other.repair && other.sourceFingerprint === sourceFingerprint && isProcessedEpochEvidence(candidate);
+  });
+}
+
 /** Only terminal states that prove an epoch was consumed belong to its ledger. */
 function isProcessedEpochEvidence(row: JobRow): boolean {
   if (row.status === "failed" || row.status === "cancelled") return true;
@@ -1048,6 +1068,8 @@ export function inspectZeroLinkRepairControl(
 ): {
   queueIntegrityConflicts: number;
   stateConflicts: number;
+  /** #563: whether THIS slug is the one in conflict; other slugs' conflicts are independent epochs. */
+  slugStateConflict: boolean;
   finalizedFingerprintOwned: boolean;
   unfinalizedOwnedJobId: number | null;
   unfinalizedOwnedLive: boolean;
@@ -1063,6 +1085,7 @@ export function inspectZeroLinkRepairControl(
   return {
     queueIntegrityConflicts: audit.queueIntegrityConflicts,
     stateConflicts: audit.globalStateConflictSlugs.size,
+    slugStateConflict: audit.globalStateConflictSlugs.has(slug),
     finalizedFingerprintOwned: audit.manifests.some(
       (manifest) => manifest.finalized && manifest.finalizedEntries.some(
         (entry) => entry.slug === slug && entry.contentFingerprint === fingerprint && finalizedEntryOwnsEpoch(entry),
@@ -1071,6 +1094,55 @@ export function inspectZeroLinkRepairControl(
     unfinalizedOwnedJobId: unfinalized?.owner.jobId ?? null,
     unfinalizedOwnedLive: Boolean(child && ACTIVE_STATUSES.has(child.status)),
   };
+}
+
+/**
+ * #563: governed exit for a live ordinary job whose frozen identity is stale only in
+ * pageContentHash while sourceFingerprint still matches the current source (raw-chunk
+ * derived pages let the two drift independently). Such a pending row is never claimable
+ * and keeps its slug in globalStateConflictSlugs forever: unfilteredSnapshot throws and
+ * submitNerEpoch rejects every slug. Terminalize it as skipped/IDENTITY_STALE — the same
+ * shape the stage uses for stale running rows — so the next audit clears on its own.
+ * Structural (queueIntegrity) conflicts, running/claimed rows, other live jobs for the same
+ * slug, and any repair history stay fail-closed and untouched.
+ * Must run inside the caller's write transaction. Returns the number of rows finalized.
+ */
+export function finalizeIdentityStaleLiveJobs(db: ZeroLinkDb): number {
+  const audit = auditQueue(db);
+  if (audit.queueIntegrityConflicts > 0 || audit.globalStateConflictSlugs.size === 0) return 0;
+  let finalized = 0;
+  for (const row of audit.rows) {
+    // Only a plain pending row that was never claimed: no started_at, no attemptLease.
+    // Running rows, partially claimed rows, and lease-carrying rows stay fail-closed.
+    if (row.name !== "ner-backfill" || row.status !== "pending" || row.started_at !== null) continue;
+    const data = audit.parsedById.get(row.id);
+    if (!data || data.kind !== "ner" || data.repair || data.attemptLease) continue;
+    if (!audit.globalStateConflictSlugs.has(data.slug)) continue;
+    // Any other live NER job for this slug (ordinary or repair) keeps the queue ambiguous,
+    // and so does terminal evidence of a second epoch: rewriting this row would erase it.
+    if (hasOtherEpochEvidence(audit, row.id, data.slug, data.sourceFingerprint)) continue;
+    // A repair history for this slug means the epoch is already governed; do not rewrite it.
+    const hasRepairHistory = audit.manifests.some(
+      (manifest) => manifest.ownership.some((owner) => owner.slug === data.slug),
+    );
+    if (hasRepairHistory) continue;
+    if (!ordinaryFrozenIdentityValid(data) || data.sourceFingerprint === undefined || data.contentHash === undefined) continue;
+    if (data.sourceFingerprint !== deriveZeroLinkSource(db, data.slug).contentFingerprint) continue;
+    const page = db.rawDb.prepare("SELECT content_hash FROM pages WHERE slug=?").get(data.slug) as { content_hash: string | null } | undefined;
+    if (!page || data.contentHash === page.content_hash) continue;
+    const raw = parseJsonObject(row.data);
+    if (!raw) continue;
+    const { attemptLease: _removed, ...withoutLease } = raw;
+    const changed = db.rawDb.prepare(
+      "UPDATE jobs SET status='done', data=?, result=?, error=NULL, finished_at=datetime('now') WHERE id=? AND status=? AND data=?",
+    ).run(
+      JSON.stringify(withoutLease),
+      JSON.stringify({ outcome: "skipped", reason: "IDENTITY_STALE", kind: "ner" }),
+      row.id, row.status, row.data,
+    );
+    finalized += Number(changed.changes);
+  }
+  return finalized;
 }
 
 export interface NerJobProtection {

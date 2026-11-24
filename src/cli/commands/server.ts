@@ -113,7 +113,7 @@ async function initWatcher(config: CBrainConfig, deps: ReturnType<typeof createD
     nerEngine,
     logger,
     nerMode: deps.nerIngestMode,
-    deferredNerSubmitter: new JobQueueNerSubmitter(deps.db),
+    deferredNerSubmitter: new JobQueueNerSubmitter(deps.db, logger),
   });
   const { FileWatcher } = await import("../../core/maintenance/watcher.js");
   const watcher = new FileWatcher(watcherSync, config.vaultPath, { logger, db: deps.db });
