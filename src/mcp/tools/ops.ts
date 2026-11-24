@@ -147,8 +147,9 @@ export function registerOpsTools(server: McpServer, ctx: ToolContext): void {
     let quarantine: Array<{ slug: string; failCount: number; lastError: string; quarantinedAt: string }> = [];
     if (quarantineRaw) {
       try {
-        const parsed = JSON.parse(quarantineRaw) as Record<string, { failCount: number; lastError: string; quarantinedAt: string }>;
-        quarantine = Object.entries(parsed).map(([slug, entry]) => ({ slug, ...entry }));
+        const parsed = JSON.parse(quarantineRaw) as Record<string, { failCount: number; lastError: string; quarantinedAt: string; readFailure?: unknown }>;
+        // #562: never expose the internal read-failure metadata (mtime/size) publicly.
+        quarantine = Object.entries(parsed).map(([slug, { readFailure: _readFailure, ...entry }]) => ({ slug, ...entry }));
       } catch { /* */ }
     }
 

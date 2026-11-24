@@ -1,11 +1,127 @@
 import { describe, test, expect, beforeEach, afterEach, mock } from "bun:test";
-import { existsSync, rmSync, mkdirSync, writeFileSync, unlinkSync, renameSync } from "node:fs";
+import { existsSync, rmSync, mkdirSync, writeFileSync, unlinkSync, renameSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
 import { FileWatcher } from "../../src/core/maintenance/watcher.js";
 import { TitleCollisionError } from "../../src/core/maintenance/sync.js";
 import type { SyncManager } from "../../src/core/maintenance/sync.js";
 import type { Logger } from "../../src/core/logger.js";
+
+describe.skipIf(process.getuid?.() === 0)("FileWatcher read-failure quarantine (#562)", () => {
+  const testDir = "/tmp/cbrain-test-watcher-read-q";
+  const vaultPath = testDir;
+  let db: CBrainDB;
+  let syncManager: SyncManager;
+  let watcher: FileWatcher | undefined;
+  let logs: Array<{ module: string; message: string; details?: Record<string, unknown> }>;
+  let logger: Logger;
+
+  const readQuarantineTestSync = (): Partial<SyncManager> => ({
+    syncPage: mock(async (_slug: string, _vaultPath: string) => ({ success: true })),
+    removePage: mock(async (_slug: string) => {}),
+  });
+
+  const flushAsync = () => new Promise((r) => setTimeout(r, 100));
+  const readFailureLogs = () => logs.filter((l) => l.message.startsWith("文件读取失败"));
+  const persistedQuarantine = (): Record<string, { failCount: number }> =>
+    JSON.parse(db.getConfig("watcher.quarantine") ?? "[]");
+
+  beforeEach(() => {
+    if (existsSync(testDir)) rmSync(testDir, { recursive: true });
+    mkdirSync(testDir, { recursive: true });
+    db = new CBrainDB(":memory:");
+    syncManager = readQuarantineTestSync() as unknown as SyncManager;
+
+    logs = [];
+    logger = {
+      info: mock((module: string, message: string, details?: Record<string, unknown>) => {
+        logs.push({ module, message, details });
+      }),
+      warn: mock((module: string, message: string, details?: Record<string, unknown>) => {
+        logs.push({ module, message, details });
+      }),
+      error: mock(),
+    } as unknown as Logger;
+  });
+
+  afterEach(async () => {
+    await watcher?.stop();
+    try { chmodSync(testDir, 0o755); } catch { /* */ }
+    for (const name of ["entity-a.md", "entity-b.md"]) {
+      try { chmodSync(join(testDir, name), 0o600); } catch { /* */ }
+    }
+    db.close();
+    if (existsSync(testDir)) rmSync(testDir, { recursive: true });
+  });
+
+  test("unreadable file is quarantined after 3 read failures while other files keep syncing", async () => {
+    const file = join(testDir, "entity-a.md");
+    writeFileSync(file, "---\ntitle: Entity A\ntype: record\n---\nBody", "utf-8");
+    writeFileSync(join(testDir, "entity-b.md"), "---\ntitle: Entity B\ntype: record\n---\nBody", "utf-8");
+    chmodSync(file, 0);
+
+    watcher = new FileWatcher(syncManager, vaultPath, { logger, db });
+    for (let i = 0; i < 5; i++) {
+      await watcher.scanOnce();
+      await flushAsync();
+    }
+
+    // Quarantine persisted with the failure threshold count
+    const persisted = persistedQuarantine();
+    expect(persisted["entity-a"]).toBeTruthy();
+    expect(persisted["entity-a"].failCount).toBe(3);
+    expect(watcher.getQuarantineSize()).toBe(1);
+    expect(watcher.getQuarantineEntries()[0]).toMatchObject({ slug: "entity-a", failCount: 3 });
+
+    // Unrelated readable file still syncs
+    const syncedSlugs = (syncManager.syncPage as ReturnType<typeof mock>).mock.calls.map(
+      (c: unknown[]) => c[0]
+    );
+    expect(syncedSlugs).toContain("entity-b");
+
+    // Read-failure logging is bounded by the quarantine threshold
+    const readWarns = readFailureLogs();
+    expect(readWarns.length).toBeGreaterThan(0);
+    expect(readWarns.length).toBeLessThanOrEqual(3);
+  });
+
+  test("quarantined unreadable file recovers once it becomes readable again", async () => {
+    const file = join(testDir, "entity-a.md");
+    const content = "---\ntitle: Entity A\ntype: record\n---\nBody";
+    writeFileSync(file, content, "utf-8");
+    chmodSync(file, 0);
+
+    watcher = new FileWatcher(syncManager, vaultPath, { logger, db });
+    for (let i = 0; i < 5; i++) {
+      await watcher.scanOnce();
+      await flushAsync();
+    }
+    expect(persistedQuarantine()["entity-a"]?.failCount).toBe(3);
+    await watcher.stop();
+
+    // Same quarantine state must survive a fresh watcher instance
+    watcher = new FileWatcher(syncManager, vaultPath, { logger, db });
+    expect(watcher.getQuarantineSize()).toBe(1);
+
+    // Unchanged (still unreadable) metadata must not emit additional read warnings
+    const warnsBefore = readFailureLogs().length;
+    await watcher.scanOnce();
+    await flushAsync();
+    expect(readFailureLogs().length).toBe(warnsBefore);
+
+    // Permission restored + length change → read resumes, quarantine clears, sync happens
+    chmodSync(file, 0o600);
+    writeFileSync(file, `${content}\nRecovered body`, "utf-8");
+    (syncManager.syncPage as ReturnType<typeof mock>).mockClear();
+    await watcher.scanOnce();
+    await flushAsync();
+
+    expect(watcher.getQuarantineSize()).toBe(0);
+    expect(persistedQuarantine()["entity-a"]).toBeUndefined();
+    expect((syncManager.syncPage as ReturnType<typeof mock>).mock.calls.map((c: unknown[]) => c[0]))
+      .toContain("entity-a");
+  });
+});
 
 describe("FileWatcher", () => {
   const testDir = "/tmp/cbrain-test-watcher";
