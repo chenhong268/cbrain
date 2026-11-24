@@ -2,7 +2,7 @@ import { describe, test, expect } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { evaluatePolicy, type Exception } from "../../bin/lib/dependency-advisory-policy.js";
-import type { Severity } from "../../bin/lib/dependency-advisory-gate.js";
+import { resolveDependencyPaths, type Severity } from "../../bin/lib/dependency-advisory-gate.js";
 
 // ── Synthetic fixture helpers (anonymous package-a/b names) ──────────────────
 
@@ -435,7 +435,7 @@ describe("evaluatePolicy — privacy + stability", () => {
     expect(r1).toBe(r2);
   });
 
-  test("22. current empty registry file is schema-valid (parses, no registry errors)", () => {
+  test("22. current registry file is schema-valid; empty registry → GO, else every entry is obsolete (no-go)", () => {
     const reg = JSON.parse(
       readFileSync(join(import.meta.dirname, "../../config/dependency-advisory-exceptions.json"), "utf-8"),
     );
@@ -448,7 +448,35 @@ describe("evaluatePolicy — privacy + stability", () => {
       "invalid_date",
     ];
     expect(r.errors.filter((e) => registryReasons.includes(e.reason)).length).toBe(0);
-    expect(r.outcome).toBe("go");
+    // An exception whose advisory is absent is reported as obsolete and blocks:
+    // the policy never silently ignores an unused exception. Exactly one
+    // obsolete error per entry, nothing else. With no entries the registry is
+    // clean and the verdict is GO (#567 upgraded SDK/zod so no exception is
+    // needed).
+    const entries = reg.exceptions as Exception[];
+    expect(r.findings).toEqual([]);
+    expect(r.outcome).toBe(entries.length === 0 ? "go" : "no-go");
+    expect(r.errors.map((e) => e.reason)).toEqual(entries.map(() => "exception_obsolete"));
+  });
+
+  test("22b. every registered dependency_path resolves against the current bun.lock", () => {
+    // Offline staleness guard (no network): a lockfile change that removes or
+    // re-routes a registered path must fail here, so the entry gets removed or
+    // updated together with the dependency change (see #567).
+    const reg = JSON.parse(
+      readFileSync(join(import.meta.dirname, "../../config/dependency-advisory-exceptions.json"), "utf-8"),
+    );
+    const lockText = readFileSync(join(import.meta.dirname, "../../bun.lock"), "utf-8");
+    const entries = reg.exceptions as Exception[];
+    for (const e of entries) {
+      const resolved = resolveDependencyPaths(lockText, e.package);
+      expect(resolved.errors).toEqual([]);
+      const canonical = resolved.paths.map((p) => [
+        "cbrain",
+        ...p.nodes.map((n) => `${n.name}@${n.version}`),
+      ]);
+      expect(canonical).toContainEqual([...e.dependency_path]);
+    }
   });
 });
 
