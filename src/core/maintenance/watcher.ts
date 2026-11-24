@@ -42,6 +42,21 @@ interface QuarantineEntry {
   hash?: string;
   fullPath?: string;
   titleCollisionJson?: { title: string; incoming: { slug: string; type: string; filePath: string }; existing: { slug: string; type: string; filePath: string } };
+  /** #562: internal marker for read-failure quarantine + the observed file metadata
+   *  used to skip re-reading unchanged unreadable files. `null` records that the
+   *  stat itself failed (no metadata available). Never part of the public MCP
+   *  status projection. */
+  readFailure?: { mtime: number; size: number } | null;
+}
+
+/** #562: compare two read-failure metadata values (either may be null when the
+ *  stat itself failed). */
+function sameReadMeta(
+  a: { mtime: number; size: number } | null,
+  b: { mtime: number; size: number } | null,
+): boolean {
+  if (a === null || b === null) return a === b;
+  return a.mtime === b.mtime && a.size === b.size;
 }
 
 export interface WatcherStopResult {
@@ -247,27 +262,54 @@ export class FileWatcher {
 
     for (const fullPath of files) {
       seen.add(fullPath);
+      const relPath = relative(this.vaultPath, fullPath);
+      const slug = relPath.replace(/\.md$/, "");
+      let meta: { mtime: number; size: number } | undefined;
       try {
         const s = await statAsync(fullPath);
-        const meta = { mtime: s.mtimeMs, size: s.size };
+        meta = { mtime: s.mtimeMs, size: s.size };
+        const quarantinedEntry = this.quarantine.get(slug);
         const prevMeta = this.mtimes.get(fullPath);
-        if (prevMeta && prevMeta.mtime === meta.mtime && prevMeta.size === meta.size) {
+        if (
+          quarantinedEntry?.readFailure === undefined
+          && prevMeta && prevMeta.mtime === meta.mtime && prevMeta.size === meta.size
+        ) {
+          continue;
+        }
+
+        // #562: a file already quarantined for read failures whose metadata has not
+        // changed is skipped without re-reading (no redundant read or logging).
+        if (
+          quarantinedEntry?.readFailure
+          && quarantinedEntry.quarantinedAt !== ""
+          && sameReadMeta(quarantinedEntry.readFailure, meta)
+        ) {
           continue;
         }
 
         const content = await readFile(fullPath, "utf-8");
+
+        // #562: a successful retried read clears only read-failure state — never a
+        // sync-failure quarantine. Content-equality below still suppresses a
+        // redundant re-sync when the hash is unchanged.
+        if (this.quarantine.get(slug)?.readFailure !== undefined) {
+          this.quarantine.delete(slug);
+          this.persistQuarantine();
+          this.logger?.info("watcher", "读取恢复，清除读取失败隔离", { slug });
+        }
+
         const h = hashContent(content);
         const prev = this.hashes.get(fullPath);
 
         if (prev === h) continue;
 
-        const relPath = relative(this.vaultPath, fullPath);
-        const slug = relPath.replace(/\.md$/, "");
         this.logger?.info("watcher", "检测到变更", { slug });
         changed.push({ slug, fullPath, hash: h, mtime: meta });
       } catch (e) {
+        // ENOENT stays silent: the file may have been removed mid-scan.
         if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
-          this.logger?.warn("watcher", `文件读取失败: ${fullPath}`, { error: String(e) });
+          // meta is undefined when the stat itself failed; persist null to mark it.
+          this.recordReadFailure(slug, fullPath, meta ?? null, (e as NodeJS.ErrnoException).code ?? "EUNKNOWN");
         }
       }
     }
@@ -395,7 +437,10 @@ export class FileWatcher {
     let quarantineCleaned = false;
     for (const [slug, entry] of this.quarantine) {
       if (entry.fullPath) {
-        try { statSync(entry.fullPath); } catch {
+        try { statSync(entry.fullPath); } catch (e) {
+          // #562: a read-failure entry whose stat fails for a non-ENOENT reason
+          // (e.g. EACCES) must stay quarantined — the file still exists.
+          if (entry.readFailure !== undefined && (e as NodeJS.ErrnoException).code !== "ENOENT") continue;
           this.quarantine.delete(slug);
           this.hashes.delete(entry.fullPath);
           this.mtimes.delete(entry.fullPath);
@@ -797,6 +842,48 @@ export class FileWatcher {
       this.logger?.warn("watcher", `文件已隔离: ${slug}（连续失败 ${failCount} 次）`, { error });
     } else {
       this.quarantine.set(slug, { failCount, lastError: error, quarantinedAt: "" });
+    }
+  }
+
+  /** #562: record a *read* failure (not a sync failure). Reuses the shared fail
+   *  threshold and persisted quarantine map. Caches the observed file metadata so
+   *  an unchanged unreadable file is not re-read on later scans. `meta === null`
+   *  marks that the stat itself failed. Never touches the normal hash/mtime sync
+   *  cache. Emits at most one non-slug/path warn per failed attempt. */
+  private recordReadFailure(
+    slug: string,
+    fullPath: string,
+    meta: { mtime: number; size: number } | null,
+    code: string,
+  ): void {
+    const entry = this.quarantine.get(slug);
+    if (entry && entry.readFailure === undefined && entry.quarantinedAt !== "") return;
+    // A read-quarantined entry that is already fully quarantined stays as-is:
+    // suppress logging even on retry and refresh metadata only when it changed.
+    if (entry && entry.readFailure !== undefined && entry.quarantinedAt !== "") {
+      const changed = !sameReadMeta(entry.readFailure, meta);
+      if (changed) {
+        entry.readFailure = meta;
+        this.persistQuarantine();
+      }
+      return;
+    }
+
+    const failCount = (entry?.readFailure !== undefined ? entry.failCount : 0) + 1;
+    const quarantined = failCount >= FAIL_THRESHOLD;
+    this.quarantine.set(slug, {
+      failCount,
+      lastError: `read_failed:${code}`,
+      quarantinedAt: quarantined ? new Date().toISOString() : "",
+      fullPath,
+      readFailure: meta,
+    });
+    // Fixed reason/code only — never the raw path or error text. One warn max.
+    if (quarantined) {
+      this.persistQuarantine();
+      this.logger?.warn("watcher", `文件已隔离: 读取失败（连续失败 ${failCount} 次）`, { code });
+    } else {
+      this.logger?.warn("watcher", "文件读取失败", { code });
     }
   }
 
