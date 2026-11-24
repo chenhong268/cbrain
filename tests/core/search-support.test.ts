@@ -857,7 +857,7 @@ describe("mergeRankedResults support propagation", () => {
     expect(Object.isFrozen(support.vector?.original)).toBe(true);
   });
 
-  test("opaque hybrid remains unsupported and fusion scoring snapshots stay unchanged", () => {
+  test("opaque hybrid remains unsupported and bounded activity fusion snapshots hold", () => {
     const opaque: SearchResult = {
       slug: "note/a",
       score: 99,
@@ -883,7 +883,7 @@ describe("mergeRankedResults support propagation", () => {
     expect(results).toEqual([
       {
         slug: "note/a",
-        score: 1 / 61 + 0.15 + 0.06,
+        score: 1 / 61 + 0.5 / 61 + 0.12 * 0.5,
         snippet: "opaque",
         source: "hybrid",
       },
