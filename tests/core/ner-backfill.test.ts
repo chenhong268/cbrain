@@ -2985,6 +2985,65 @@ describe("deferred NER queue self-heal (#563)", () => {
     expect(JSON.stringify(db.getJob(first.jobId!))).toBe(before);
   });
 
+  test("duplicate pending rows for one slug stay fail-closed after hash drift, byte-for-byte unchanged", async () => {
+    addSealedRecord("records/poison", "h1");
+    const s = new JobQueueNerSubmitter(db);
+    const first = s.submitDeferredNer({ slug: "records/poison" });
+    // second ordinary pending row for the same frozen identity (e.g. replayed submit)
+    const duplicate = db.submitJob("ner-backfill", JSON.parse(db.getJob(first.jobId!)!.data!));
+    db.updatePageHash("records/poison", "h2");
+    expect(db.listJobs("pending")).toHaveLength(2);
+    const before = JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all());
+    await expect(runNerBackfillStage(db, stubPipeline(), new PageManager(db, testDir))).rejects.toThrow("QUEUE_INTEGRITY_CONFLICT");
+    expect(JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all())).toBe(before);
+    expect(db.getJob(duplicate)!.status).toBe("pending");
+    expect(db.getJob(duplicate)!.result).toBeNull();
+    expect(db.getJob(duplicate)!.error).toBeNull();
+  });
+
+  test("double terminal evidence for one epoch is not masked by the only live row after hash drift, byte-for-byte unchanged", async () => {
+    addSealedRecord("records/poison", "h1");
+    const s = new JobQueueNerSubmitter(db);
+    const live = s.submitDeferredNer({ slug: "records/poison" });
+    expect(live.disposition).toBe("inserted");
+    // Copy the exact frozen payload into two additional jobs and mark both done with
+    // processed evidence for the same epoch. auditQueue only detects this terminal
+    // duplicate while a current live row for the slug still exists; the correction
+    // must not clear that only live row and thereby resolve the epoch.
+    const frozen = db.getJob(live.jobId!)!.data!;
+    for (let i = 0; i < 2; i++) {
+      const id = db.submitJob("ner-backfill", JSON.parse(frozen));
+      db.rawDb.prepare("UPDATE jobs SET status='done', result=?, finished_at=datetime('now') WHERE id=?")
+        .run(JSON.stringify({ outcome: "processed", kind: "ner" }), id);
+    }
+    db.updatePageHash("records/poison", "h2");
+    const before = JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all());
+
+    await expect(runNerBackfillStage(db, stubPipeline(), new PageManager(db, testDir), { maxItems: 10 }))
+      .rejects.toThrow("QUEUE_INTEGRITY_CONFLICT");
+    expect(JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all())).toBe(before);
+    expect(db.getJob(live.jobId!)!.status).toBe("pending");
+    expect(db.getJob(live.jobId!)!.result).toBeNull();
+  });
+
+  test("a pending row holding a valid claimed lease is not auto-exited after hash drift, byte-for-byte unchanged", async () => {
+    addSealedRecord("records/poison", "h1");
+    const s = new JobQueueNerSubmitter(db);
+    const first = s.submitDeferredNer({ slug: "records/poison" });
+    // hand the row back to pending while its claimed lease is still valid
+    expect(claimNerJob(first.jobId!)).not.toBeNull();
+    db.rawDb.prepare("UPDATE jobs SET status = 'pending', started_at = NULL WHERE id = ?").run(first.jobId!);
+    const leased = db.getJob(first.jobId!)!;
+    expect(JSON.parse(leased.data!)).toMatchObject({ attemptLease: expect.any(Object) });
+    expect(leased.status).toBe("pending");
+    db.updatePageHash("records/poison", "h2");
+    const before = JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all());
+    await expect(runNerBackfillStage(db, stubPipeline(), new PageManager(db, testDir))).rejects.toThrow("QUEUE_INTEGRITY_CONFLICT");
+    expect(JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all())).toBe(before);
+    expect(db.getJob(first.jobId!)!.status).toBe("pending");
+    expect(db.getJob(first.jobId!)!.result).toBeNull();
+  });
+
   test("every rejection emits a reason-coded warn log", () => {
     const logs: Array<{ module: string; message: string; details?: Record<string, unknown> }> = [];
     const logger = {
@@ -3002,7 +3061,9 @@ describe("deferred NER queue self-heal (#563)", () => {
     expect(logs.map((entry) => entry.details?.reasonCode)).toEqual(["PAGE_OR_SOURCE_MISSING", "QUEUE_INTEGRITY_CONFLICT"]);
     expect(logs[1]).toMatchObject({
       module: "ner-backfill",
-      details: { slug: "records/poison", reasonCode: "QUEUE_INTEGRITY_CONFLICT" },
+      details: { reasonCode: "QUEUE_INTEGRITY_CONFLICT" },
     });
+    // reason-code alerts must not leak the real slug
+    expect(logs[1].details).not.toHaveProperty("slug");
   });
 });

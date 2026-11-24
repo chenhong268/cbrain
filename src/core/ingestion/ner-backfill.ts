@@ -105,7 +105,7 @@ export class JobQueueNerSubmitter implements DeferredNerSubmitter {
   private submitNerEpoch(input: DeferredNerInput): DeferredNerSubmitResult {
     const page = this.db.getPage(input.slug);
     const source = deriveZeroLinkSource(this.db, input.slug);
-    if (!page || !source.contentFingerprint) return this.reject(input.slug, "PAGE_OR_SOURCE_MISSING");
+    if (!page || !source.contentFingerprint) return this.reject("PAGE_OR_SOURCE_MISSING");
     const payload = {
       slug: input.slug,
       pageContentHash: page.content_hash,
@@ -127,7 +127,7 @@ export class JobQueueNerSubmitter implements DeferredNerSubmitter {
     // whole queue (no consumption, no replenishment). Structural conflicts stay global.
     const repairControl = inspectZeroLinkRepairControl(this.db, input.slug, source.contentFingerprint);
     if (repairControl.queueIntegrityConflicts > 0 || repairControl.slugStateConflict) {
-      return this.reject(input.slug, "QUEUE_INTEGRITY_CONFLICT");
+      return this.reject("QUEUE_INTEGRITY_CONFLICT");
     }
     if (repairControl.finalizedFingerprintOwned) {
       return { disposition: "already_processed", jobId: null, pending: false };
@@ -135,17 +135,17 @@ export class JobQueueNerSubmitter implements DeferredNerSubmitter {
     if (repairControl.unfinalizedOwnedJobId !== null) {
       return repairControl.unfinalizedOwnedLive
         ? { disposition: "existing_active", jobId: repairControl.unfinalizedOwnedJobId, pending: true }
-        : this.reject(input.slug, "OWNED_JOB_NOT_LIVE");
+        : this.reject("OWNED_JOB_NOT_LIVE");
     }
     const terminal = slugRows.filter((row) => !row.parsed.repair && row.parsed.sourceFingerprint === source.contentFingerprint && !["pending", "running"].includes(row.status));
     if (terminal.some((row) => row.status === "done" && safeJobData(row.result)?.outcome === "commit_unknown")) {
-      return this.reject(input.slug, "COMMIT_UNKNOWN");
+      return this.reject("COMMIT_UNKNOWN");
     }
     if (terminal.some((row) => row.status === "done" && safeJobData(row.result)?.outcome === "processed")) {
       return { disposition: "already_processed", jobId: null, pending: false };
     }
     if (terminal.some((row) => row.status === "failed" || row.status === "cancelled")) {
-      return this.reject(input.slug, "TERMINAL_FAILED");
+      return this.reject("TERMINAL_FAILED");
     }
 
     const live = slugRows.filter((row) => !row.parsed.repair && (row.status === "pending" || row.status === "running"));
@@ -153,11 +153,11 @@ export class JobQueueNerSubmitter implements DeferredNerSubmitter {
     if (current.length === 1 && (current[0].status === "pending" || !isOrdinaryStale(current[0].started_at))) {
       return { disposition: "existing_active", jobId: current[0].id, pending: true };
     }
-    if (current.length === 1) return this.reject(input.slug, "STALE_RUNNING_SINGLE");
-    if (current.length > 1) return this.reject(input.slug, "MULTIPLE_LIVE");
+    if (current.length === 1) return this.reject("STALE_RUNNING_SINGLE");
+    if (current.length > 1) return this.reject("MULTIPLE_LIVE");
     const old = live.filter((row) => row.parsed.sourceFingerprint !== source.contentFingerprint);
     if (old.length !== 1 || current.length !== 0) {
-      if (old.length !== 0) return this.reject(input.slug, "MULTIPLE_OLD_FINGERPRINT");
+      if (old.length !== 0) return this.reject("MULTIPLE_OLD_FINGERPRINT");
     } else {
       const predecessor = old[0];
       if (predecessor.status === "pending") {
@@ -170,7 +170,7 @@ export class JobQueueNerSubmitter implements DeferredNerSubmitter {
       }
       if (predecessor.status === "running") {
         const lease = predecessor.parsed.attemptLease as Record<string, unknown> | undefined;
-        if (lease?.phase === "committing") return this.reject(input.slug, "PREDECESSOR_COMMITTING");
+        if (lease?.phase === "committing") return this.reject("PREDECESSOR_COMMITTING");
         if (isOrdinaryStale(predecessor.started_at)) {
           const result = { outcome: "skipped", reason: "SOURCE_CHANGED", kind: "ner" };
           const { attemptLease: _removed, ...withoutLease } = predecessor.parsed;
@@ -191,9 +191,9 @@ export class JobQueueNerSubmitter implements DeferredNerSubmitter {
     return { disposition: "inserted", jobId: Number(inserted.lastInsertRowid), pending: true };
   }
 
-  /** #563: every rejection carries a reason code so a stalled write path is diagnosable. */
-  private reject(slug: string, reason: string): DeferredNerSubmitResult {
-    this.logger?.warn("ner-backfill", "deferred NER submission rejected", { slug, reasonCode: reason });
+  /** #563: rejections log a reason code so a stalled write path is diagnosable without identities. */
+  private reject(reason: string): DeferredNerSubmitResult {
+    this.logger?.warn("ner-backfill", "deferred NER submission rejected", { reasonCode: reason });
     return { disposition: "rejected", jobId: null, pending: false };
   }
 }
@@ -306,10 +306,14 @@ function unfilteredSnapshot(
 ): { ids: number[]; retriedFailed: number } {
   db.rawDb.exec("BEGIN IMMEDIATE");
   try {
-    // #563: clear a stale-pageContentHash live row before the global audit, otherwise one
-    // unclaimable pending job aborts the whole stage forever (52 days in production).
-    finalizeIdentityStaleLiveJobs(db);
-    const audit = planZeroLinkBackfill(db, 0);
+    // #563: one unclaimable pending job (stale pageContentHash live row) aborts the whole
+    // stage forever (52 days in production). Run the normal plan first; only when the only
+    // conflict is a state conflict do we attempt the governed exit and re-audit. The normal
+    // nightly path pays no extra audit.
+    let audit = planZeroLinkBackfill(db, 0);
+    if (audit.queueIntegrityConflicts === 0 && audit.stateConflicts > 0 && finalizeIdentityStaleLiveJobs(db) > 0) {
+      audit = planZeroLinkBackfill(db, 0);
+    }
     if (audit.queueIntegrityConflicts > 0 || audit.stateConflicts > 0) throw new Error("QUEUE_INTEGRITY_CONFLICT");
     const protection = getNerJobProtection(db);
     if (protection.integrityUnknown) throw new Error("QUEUE_INTEGRITY_CONFLICT");
