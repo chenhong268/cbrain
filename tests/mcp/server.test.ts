@@ -2033,17 +2033,19 @@ describe("MCP Server", () => {
     });
 
     test("full sync returns structured diagnostics on title collision", async () => {
-      // Seed existing page with title "人物A"
-      mkdirSync(join(vaultPath, "brain/entities/person"), { recursive: true });
-      writeFileSync(join(vaultPath, "brain/entities/person/renwu-a.md"),
-        "---\ntitle: 人物A\ntype: entity/person\nslug: brain/entities/person/renwu-a\n---\n已有实体", "utf-8");
+      // Seed an entity page with title "人物A". The non-person type keeps both files on
+      // the generic collision path instead of the person+record special case.
+      mkdirSync(join(vaultPath, "brain/entities/company"), { recursive: true });
+      writeFileSync(join(vaultPath, "brain/entities/company/renwu-a-co.md"),
+        "---\ntitle: 人物A\ntype: entity/company\nslug: brain/entities/company/renwu-a-co\n---\n已有实体", "utf-8");
 
+      // Second fixture: a record page sharing the same title "人物A"
       mkdirSync(join(vaultPath, "records"), { recursive: true });
       writeFileSync(join(vaultPath, "records/renwu-a-note.md"),
         "---\ntitle: 人物A\ntype: record\nslug: records/renwu-a-note\n---\n新记录", "utf-8");
 
       const server = createServer(deps);
-      // Both files are new — whichever is processed second will hit title collision
+      // Both files are new — whichever is processed second will hit the generic title collision
       const result = await getTools(server).sync.handler({});
       const data = JSON.parse(result.content[0].text);
       expect(data.errors).toBeGreaterThanOrEqual(1);
