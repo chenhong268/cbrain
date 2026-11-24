@@ -4,6 +4,14 @@
 
 ## [Unreleased]
 
+### Agent 工具合同 v2（#567）
+
+- MCP SDK 固定为 1.32.2，Zod 固定为 4.6.7。移除已修复公告的五条临时例外。
+- 20 个 Agent 工具中有 19 个 schema 更新。输入 schema 省略顶层 `additionalProperties: false`。`profile.entries` 的元素 schema 也省略该字段。`put_page.extra` 的键 schema 明示字符串类型。
+- 结构化模式中，`deep_recall`、`get_timeline`、`graph_query` 的可选 `audit` 对象出现时，schema 要求 `raw` 字段。工具名称和权限保持一致。
+- 缓存或固定校验 `tools/list` 的客户端需刷新工具定义。回滚时恢复旧构建，并刷新客户端工具定义。
+
+
 ### 本地 embedding provider 接入（#544）
 
 - `embedding.provider` 新增取值 `ollama`，通过本机 `/api/embed` 使用 `qwen3-embedding:0.6b`，输出 1024 维。选择该 provider 时不上传 embedding 文本到云端，也不需要 `ZHIPU_API_KEY`。

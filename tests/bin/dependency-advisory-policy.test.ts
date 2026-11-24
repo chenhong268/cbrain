@@ -435,7 +435,7 @@ describe("evaluatePolicy — privacy + stability", () => {
     expect(r1).toBe(r2);
   });
 
-  test("22. current registry file is schema-valid; with no advisories every entry is obsolete (no-go)", () => {
+  test("22. current registry file is schema-valid; empty registry → GO, else every entry is obsolete (no-go)", () => {
     const reg = JSON.parse(
       readFileSync(join(import.meta.dirname, "../../config/dependency-advisory-exceptions.json"), "utf-8"),
     );
@@ -448,13 +448,15 @@ describe("evaluatePolicy — privacy + stability", () => {
       "invalid_date",
     ];
     expect(r.errors.filter((e) => registryReasons.includes(e.reason)).length).toBe(0);
-    // The registry is no longer empty. An exception whose advisory is absent is
-    // reported as obsolete and blocks: the policy never silently ignores an
-    // unused exception. Exactly one obsolete error per entry, nothing else.
-    expect(reg.exceptions.length).toBeGreaterThan(0);
-    expect(r.outcome).toBe("no-go");
+    // An exception whose advisory is absent is reported as obsolete and blocks:
+    // the policy never silently ignores an unused exception. Exactly one
+    // obsolete error per entry, nothing else. With no entries the registry is
+    // clean and the verdict is GO (#567 upgraded SDK/zod so no exception is
+    // needed).
+    const entries = reg.exceptions as Exception[];
     expect(r.findings).toEqual([]);
-    expect(r.errors.map((e) => e.reason)).toEqual(reg.exceptions.map(() => "exception_obsolete"));
+    expect(r.outcome).toBe(entries.length === 0 ? "go" : "no-go");
+    expect(r.errors.map((e) => e.reason)).toEqual(entries.map(() => "exception_obsolete"));
   });
 
   test("22b. every registered dependency_path resolves against the current bun.lock", () => {
@@ -466,7 +468,6 @@ describe("evaluatePolicy — privacy + stability", () => {
     );
     const lockText = readFileSync(join(import.meta.dirname, "../../bun.lock"), "utf-8");
     const entries = reg.exceptions as Exception[];
-    expect(entries.length).toBeGreaterThan(0);
     for (const e of entries) {
       const resolved = resolveDependencyPaths(lockText, e.package);
       expect(resolved.errors).toEqual([]);
