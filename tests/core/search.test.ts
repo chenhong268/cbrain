@@ -174,6 +174,34 @@ describe("HybridSearch", () => {
       expect(merged.length).toBe(1);
       expect(merged[0].snippet).toBe("s1");
     });
+
+    // #560 regression: activity must not overturn the RRF rank interaction.
+    // "lead" leads both lists (2/61) while "tail" appears only once, at rank
+    // 10 of a single list (1/70); no activity weight may flip that ordering.
+    test("activity component cannot overturn the multi-channel rank interaction (#560)", () => {
+      const item = (slug: string, score: number): SearchResult =>
+        ({ slug, score, snippet: "", source: "vector" });
+      const listA: SearchResult[] = [
+        item("lead", 0.9),
+        ...Array.from({ length: 8 }, (_, i) => item(`filler-${i}`, 0.8 - i * 0.01)),
+        item("tail", 0.1),
+      ];
+      const listB: SearchResult[] = [item("lead", 0.9)];
+
+      for (const activity of [
+        new Map([["tail", 0.15]]),
+        new Map([["tail", 100]]),
+        new Map([["lead", -100], ["tail", 100]]),
+      ]) {
+        const merged = mergeRankedResults([listA, listB], 60, 3, activity);
+        expect(merged[0].slug).toBe("lead");
+      }
+
+      // But a bounded, genuinely small activity weight on a near-tie still tips it.
+      const closeA: SearchResult[] = [item("lead", 0.9), item("tail", 0.89)];
+      const broken = mergeRankedResults([closeA], 60, 2, new Map([["tail", 0.005]]));
+      expect(broken[0].slug).toBe("tail");
+    });
   });
 
   describe("graph search (BFS link traversal)", () => {

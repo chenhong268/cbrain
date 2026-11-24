@@ -368,9 +368,13 @@ function mergeRankedResultsLegacy(
     }
   }
 
+  // Each bonus is bounded by half a top-rank RRF score (#560).
+  const maxActivityBonus = 0.5 / (k + 1);
+
   const results: SearchResult[] = [];
   for (const [slug, data] of slugData) {
-    const activityBonus = activityWeights ? W_ACTIVITY * (activityWeights.get(slug) ?? 0) : 0;
+    const weightedActivity = W_ACTIVITY * (activityWeights?.get(slug) ?? 0);
+    const activityBonus = Math.max(-maxActivityBonus, Math.min(maxActivityBonus, weightedActivity));
     const hotnessBonus = hotnessWeights ? W_HOTNESS * (hotnessWeights.get(slug) ?? 0) : 0;
     results.push({
       slug,

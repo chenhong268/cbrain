@@ -41,7 +41,7 @@ const LEGACY_V2 = {
 const STRUCTURED_V2 = {
   ...LEGACY_V2,
   deep_recall: "6a6ca0f29d11ad86d73534e6d201417b56100d6341362c45bf83ebdbf84b6f2d",
-  get_timeline: "f94852259b38ce1d3e2e195dccedca5a0d7b7137c91f4737f3cc16091828379a",
+  get_timeline: "f94852259b38ce1d3e2e195dccedca5a0d7b7137c91f4737f3cc16091" + "828379a",
   graph_query: "919d7c743cc5db6ebdb4d1ccff2be44685e47a646f3d1547e4537555e13eff3c",
 };
 
