@@ -20,6 +20,7 @@ import { hasKnownRelationsDrift } from "../../src/core/graph/known-relations-pro
 import { probeLance } from "../../src/core/fsck/lance-probe";
 import { EntityFactsTimeoutError } from "../../src/core/ingestion/entity-facts";
 import { submitDeferredNerForWritePath } from "../../src/core/ingestion/ner-write-path";
+import type { Logger } from "../../src/core/logger";
 import {
   authorizeNerJobClaim,
   deriveZeroLinkSource,
@@ -2910,4 +2911,159 @@ test("Dream cancellation stops backfill before claiming the next record (#494)",
   expect(db.getJob(first)?.status).toBe("done"); // missing source is an explicit skip
   expect(db.getJob(second)?.status).toBe("pending");
   expect(db.getJob(second)?.attempts).toBe(0);
+});
+
+describe("deferred NER queue self-heal (#563)", () => {
+  /** Raw-chunk-derived page: its fingerprint follows chunks, so the page hash can drift on its own. */
+  const addSealedRecord = (slug: string, hash: string) => {
+    db.upsertPage({ slug, type: "record", title: slug, filePath: `${slug}.md`, contentHash: hash });
+    db.insertChunk(slug, 0, "body text");
+    db.insertChunkWithLevel(slug, 0, "summary", 1, "summary-hash");
+  };
+  const addPlainRecord = (slug: string, hash = "page-hash") => {
+    db.upsertPage({ slug, type: "record", title: slug, filePath: `${slug}.md`, contentHash: hash });
+    db.insertChunk(slug, 0, "first");
+  };
+  const stubPipeline = () => ({ processNer: async () => {} } as unknown as ContentPipeline);
+
+  test("audit still flags a stale pageContentHash row before any stage runs (#342 fail-closed kept)", () => {
+    addSealedRecord("records/poison", "h1");
+    const first = new JobQueueNerSubmitter(db).submitDeferredNer({ slug: "records/poison" });
+    expect(JSON.parse(db.getJob(first.jobId!)!.data!)).toMatchObject({ pageContentHash: "h1" });
+    // submit and hash update land in the same second — the production trigger for job 857
+    db.updatePageHash("records/poison", "h2");
+    expect(planZeroLinkBackfill(db)).toMatchObject({ status: "blocked", stateConflicts: 1, queueIntegrityConflicts: 0 });
+  });
+
+  test("born-stale job is terminalized as skipped/IDENTITY_STALE and the queue unblocks", async () => {
+    addSealedRecord("records/poison", "h1");
+    const s = new JobQueueNerSubmitter(db);
+    const first = s.submitDeferredNer({ slug: "records/poison" });
+    db.updatePageHash("records/poison", "h2");
+
+    await runNerBackfillStage(db, stubPipeline(), new PageManager(db, testDir), { maxItems: 10 });
+
+    expect(JSON.parse(db.getJob(first.jobId!)!.result!)).toEqual({ outcome: "skipped", reason: "IDENTITY_STALE", kind: "ner" });
+    expect(db.getJob(first.jobId!)!.status).toBe("done");
+    expect(db.getJob(first.jobId!)!.error).toBeNull();
+    expect(planZeroLinkBackfill(db)).toMatchObject({ status: "ok", stateConflicts: 0, queueIntegrityConflicts: 0 });
+    // the slug is submittable again: a skipped row is not epoch evidence
+    expect(s.submitDeferredNer({ slug: "records/poison" }).disposition).toBe("inserted");
+  });
+
+  test("one slug's state conflict no longer rejects unrelated slugs", () => {
+    addSealedRecord("records/poison", "h1");
+    addPlainRecord("records/fresh");
+    const s = new JobQueueNerSubmitter(db);
+    s.submitDeferredNer({ slug: "records/poison" });
+    db.updatePageHash("records/poison", "h2");
+    expect(s.submitDeferredNer({ slug: "records/poison" }).disposition).toBe("rejected"); // own conflict still blocks
+    expect(s.submitDeferredNer({ slug: "records/fresh" }).disposition).toBe("inserted"); // independent epoch flows
+    expect(db.listJobs("pending")).toHaveLength(2);
+  });
+
+  test("structural (queue integrity) conflicts stay global and leave the stale row byte-for-byte intact", async () => {
+    addSealedRecord("records/poison", "h1");
+    const s = new JobQueueNerSubmitter(db);
+    s.submitDeferredNer({ slug: "records/poison" });
+    db.updatePageHash("records/poison", "h2");
+    db.submitJob("ner-backfill", { pageType: "record" }); // malformed live row: no slug
+    expect(s.submitDeferredNer({ slug: "records/fresh" }).disposition).toBe("rejected");
+    const before = JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all());
+    await expect(runNerBackfillStage(db, stubPipeline(), new PageManager(db, testDir))).rejects.toThrow("QUEUE_INTEGRITY_CONFLICT");
+    expect(JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all())).toBe(before);
+  });
+
+  test("a fresh running row is left alone even if its page hash drifted mid-run", async () => {
+    addSealedRecord("records/poison", "h1");
+    const s = new JobQueueNerSubmitter(db);
+    const first = s.submitDeferredNer({ slug: "records/poison" });
+    expect(claimNerJob(first.jobId!)).not.toBeNull();
+    db.updatePageHash("records/poison", "h2");
+    const before = JSON.stringify(db.getJob(first.jobId!));
+    await expect(runNerBackfillStage(db, stubPipeline(), new PageManager(db, testDir))).rejects.toThrow("QUEUE_INTEGRITY_CONFLICT");
+    expect(JSON.stringify(db.getJob(first.jobId!))).toBe(before);
+  });
+
+  test("duplicate pending rows for one slug stay fail-closed after hash drift, byte-for-byte unchanged", async () => {
+    addSealedRecord("records/poison", "h1");
+    const s = new JobQueueNerSubmitter(db);
+    const first = s.submitDeferredNer({ slug: "records/poison" });
+    // second ordinary pending row for the same frozen identity (e.g. replayed submit)
+    const duplicate = db.submitJob("ner-backfill", JSON.parse(db.getJob(first.jobId!)!.data!));
+    db.updatePageHash("records/poison", "h2");
+    expect(db.listJobs("pending")).toHaveLength(2);
+    const before = JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all());
+    await expect(runNerBackfillStage(db, stubPipeline(), new PageManager(db, testDir))).rejects.toThrow("QUEUE_INTEGRITY_CONFLICT");
+    expect(JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all())).toBe(before);
+    expect(db.getJob(duplicate)!.status).toBe("pending");
+    expect(db.getJob(duplicate)!.result).toBeNull();
+    expect(db.getJob(duplicate)!.error).toBeNull();
+  });
+
+  test("double terminal evidence for one epoch is not masked by the only live row after hash drift, byte-for-byte unchanged", async () => {
+    addSealedRecord("records/poison", "h1");
+    const s = new JobQueueNerSubmitter(db);
+    const live = s.submitDeferredNer({ slug: "records/poison" });
+    expect(live.disposition).toBe("inserted");
+    // Copy the exact frozen payload into two additional jobs and mark both done with
+    // processed evidence for the same epoch. auditQueue only detects this terminal
+    // duplicate while a current live row for the slug still exists; the correction
+    // must not clear that only live row and thereby resolve the epoch.
+    const frozen = db.getJob(live.jobId!)!.data!;
+    for (let i = 0; i < 2; i++) {
+      const id = db.submitJob("ner-backfill", JSON.parse(frozen));
+      db.rawDb.prepare("UPDATE jobs SET status='done', result=?, finished_at=datetime('now') WHERE id=?")
+        .run(JSON.stringify({ outcome: "processed", kind: "ner" }), id);
+    }
+    db.updatePageHash("records/poison", "h2");
+    const before = JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all());
+
+    await expect(runNerBackfillStage(db, stubPipeline(), new PageManager(db, testDir), { maxItems: 10 }))
+      .rejects.toThrow("QUEUE_INTEGRITY_CONFLICT");
+    expect(JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all())).toBe(before);
+    expect(db.getJob(live.jobId!)!.status).toBe("pending");
+    expect(db.getJob(live.jobId!)!.result).toBeNull();
+  });
+
+  test("a pending row holding a valid claimed lease is not auto-exited after hash drift, byte-for-byte unchanged", async () => {
+    addSealedRecord("records/poison", "h1");
+    const s = new JobQueueNerSubmitter(db);
+    const first = s.submitDeferredNer({ slug: "records/poison" });
+    // hand the row back to pending while its claimed lease is still valid
+    expect(claimNerJob(first.jobId!)).not.toBeNull();
+    db.rawDb.prepare("UPDATE jobs SET status = 'pending', started_at = NULL WHERE id = ?").run(first.jobId!);
+    const leased = db.getJob(first.jobId!)!;
+    expect(JSON.parse(leased.data!)).toMatchObject({ attemptLease: expect.any(Object) });
+    expect(leased.status).toBe("pending");
+    db.updatePageHash("records/poison", "h2");
+    const before = JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all());
+    await expect(runNerBackfillStage(db, stubPipeline(), new PageManager(db, testDir))).rejects.toThrow("QUEUE_INTEGRITY_CONFLICT");
+    expect(JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all())).toBe(before);
+    expect(db.getJob(first.jobId!)!.status).toBe("pending");
+    expect(db.getJob(first.jobId!)!.result).toBeNull();
+  });
+
+  test("every rejection emits a reason-coded warn log", () => {
+    const logs: Array<{ module: string; message: string; details?: Record<string, unknown> }> = [];
+    const logger = {
+      info: () => {},
+      warn: (module: string, message: string, details?: Record<string, unknown>) => { logs.push({ module, message, details }); },
+      error: () => {},
+      // SAFETY: test double only needs the Logger surface JobQueueNerSubmitter calls.
+    } as unknown as Logger;
+    const s = new JobQueueNerSubmitter(db, logger);
+    addSealedRecord("records/poison", "h1");
+    s.submitDeferredNer({ slug: "records/poison" });
+    db.updatePageHash("records/poison", "h2");
+    expect(s.submitDeferredNer({ slug: "records/missing" }).disposition).toBe("rejected");
+    expect(s.submitDeferredNer({ slug: "records/poison" }).disposition).toBe("rejected");
+    expect(logs.map((entry) => entry.details?.reasonCode)).toEqual(["PAGE_OR_SOURCE_MISSING", "QUEUE_INTEGRITY_CONFLICT"]);
+    expect(logs[1]).toMatchObject({
+      module: "ner-backfill",
+      details: { reasonCode: "QUEUE_INTEGRITY_CONFLICT" },
+    });
+    // reason-code alerts must not leak the real slug
+    expect(logs[1].details).not.toHaveProperty("slug");
+  });
 });
